@@ -132,9 +132,15 @@
   .settings-btns{ display:flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   .settings-theme-btn.active, .settings-density-btn.active, .settings-chatpos-btn.active{ background: var(--gold); color: #17140d; border-color: var(--gold); }
   .settings-order-list{ display:flex; flex-direction:column; gap: 6px; }
-  .settings-order-row{ display:flex; align-items:center; justify-content:space-between; background: var(--bg-raised); border: 1px solid var(--panel-border); border-radius: 7px; padding: 8px 10px; font-size: 12.5px; color: var(--text); }
-  .settings-order-btns{ display:flex; gap: 4px; }
-  .settings-order-btns button:disabled{ opacity: 0.3; cursor: default; }
+  .settings-order-row{ display:flex; align-items:center; gap: 10px; background: var(--bg-raised); border: 1px solid var(--panel-border); border-radius: 7px; padding: 8px 10px; font-size: 12.5px; color: var(--text); cursor: grab; position: relative; }
+  .settings-order-row:active{ cursor: grabbing; }
+  .settings-order-row.dragging{ opacity: 0.4; }
+  .order-drag-handle{ color: var(--text-dim); font-size: 14px; line-height: 1; user-select: none; }
+  .settings-order-row.drag-over-top::before, .settings-order-row.drag-over-bottom::after{
+    content: ''; position: absolute; left: 8px; right: 8px; height: 2px; background: var(--gold);
+  }
+  .settings-order-row.drag-over-top::before{ top: -4px; }
+  .settings-order-row.drag-over-bottom::after{ bottom: -4px; }
   .collapse-toggle{ white-space:nowrap; }
   .scroll-table{ max-height: 420px; overflow-y: auto; }
   .table-more-row{ text-align:center; padding-top: 10px; }
@@ -435,6 +441,33 @@ let thLoading = false;
 const $ = sel => document.querySelector(sel);
 const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+// Expands CoC's compact "YYYYMMDDTHHMMSS.000Z" timestamp into a real ISO
+// string; passes anything else through unchanged (already-ISO Supabase
+// timestamps, etc.).
+function toIsoTimestamp(value){
+  if(!value) return null;
+  if(/^\d{8}T/.test(value)){
+    const y = value.slice(0,4), mo = value.slice(4,6), d = value.slice(6,8);
+    const hh = value.slice(9,11) || '00', mi = value.slice(11,13) || '00', ss = value.slice(13,15) || '00';
+    return `${y}-${mo}-${d}T${hh}:${mi}:${ss}Z`;
+  }
+  return value;
+}
+
+// Parses any timestamp shape down to epoch milliseconds. Used to dedupe the
+// same war/raid across sources (live CoC data vs. Supabase-archived data)
+// that may represent the identical instant as DIFFERENT strings — e.g. if a
+// column is typed timestamptz, Postgres round-trips "20260913T182241.000Z"
+// back as "2026-09-13T18:22:41+00:00". Those never string-match, but their
+// epoch-ms values do, which is why merges below key on this instead of the
+// raw string.
+function toEpochMs(value){
+  const iso = toIsoTimestamp(value);
+  if(!iso) return null;
+  const t = new Date(iso).getTime();
+  return isNaN(t) ? null : t;
+}
+
 // Formats any date-like value as DD/MM/YYYY, converted to India Standard
 // Time (Asia/Kolkata, UTC+5:30) regardless of the machine's own timezone.
 // Accepts normal ISO strings (Supabase's created_at/updated_at) as well as
@@ -444,13 +477,8 @@ const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<'
 // near the UTC/IST day boundary come out a day off).
 const IST_DATE_FORMATTER = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' });
 function formatDMY(value){
-  if(!value) return '—';
-  let iso = value;
-  if(/^\d{8}T/.test(value)){
-    const y = value.slice(0,4), mo = value.slice(4,6), d = value.slice(6,8);
-    const hh = value.slice(9,11) || '00', mi = value.slice(11,13) || '00', ss = value.slice(13,15) || '00';
-    iso = `${y}-${mo}-${d}T${hh}:${mi}:${ss}Z`;
-  }
+  const iso = toIsoTimestamp(value);
+  if(!iso) return '—';
   const date = new Date(iso);
   if(isNaN(date)) return '—';
   return IST_DATE_FORMATTER.format(date); // en-GB renders as DD/MM/YYYY
@@ -568,11 +596,14 @@ function applySectionOrder(){
   if(settings) colMain.appendChild(settings);
 }
 
-function moveSection(id, dir){
-  const idx = sectionOrder.indexOf(id);
-  const newIdx = idx + dir;
-  if(idx === -1 || newIdx < 0 || newIdx >= sectionOrder.length) return;
-  [sectionOrder[idx], sectionOrder[newIdx]] = [sectionOrder[newIdx], sectionOrder[idx]];
+function reorderSection(draggedId, targetId, placeAfter){
+  const from = sectionOrder.indexOf(draggedId);
+  if(from === -1 || draggedId === targetId) return;
+  sectionOrder.splice(from, 1);
+  let to = sectionOrder.indexOf(targetId);
+  if(to === -1) return;
+  if(placeAfter) to += 1;
+  sectionOrder.splice(to, 0, draggedId);
   try{ localStorage.setItem('warroom_section_order', JSON.stringify(sectionOrder)); }catch(e){}
   applySectionOrder();
   renderSettings();
@@ -643,13 +674,10 @@ function renderSettings(){
       </div>
     </div>`;
 
-  const orderRows = sectionOrder.map((id, i) => `
-    <div class="settings-order-row">
+  const orderRows = sectionOrder.map((id) => `
+    <div class="settings-order-row" draggable="true" data-id="${esc(id)}">
+      <span class="order-drag-handle" title="Drag to reorder">⠿</span>
       <span>${esc(SECTION_LABELS[id] || id)}</span>
-      <div class="settings-order-btns">
-        <button class="btn-ghost btn-small order-up" data-id="${esc(id)}" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>
-        <button class="btn-ghost btn-small order-down" data-id="${esc(id)}" ${i === sectionOrder.length - 1 ? 'disabled' : ''} title="Move down">↓</button>
-      </div>
     </div>`).join('');
 
   const body = `
@@ -672,10 +700,6 @@ document.addEventListener('click', (e) => {
   if(themeBtn){ setTheme(themeBtn.dataset.theme); return; }
   const densityBtn = e.target.closest('.settings-density-btn');
   if(densityBtn){ setDensity(densityBtn.dataset.density); return; }
-  const upBtn = e.target.closest('.order-up');
-  if(upBtn){ moveSection(upBtn.dataset.id, -1); return; }
-  const downBtn = e.target.closest('.order-down');
-  if(downBtn){ moveSection(downBtn.dataset.id, 1); return; }
   const applyPollBtn = e.target.closest('#applyPollInterval');
   if(applyPollBtn){
     const input = $('#pollIntervalInput');
@@ -689,6 +713,46 @@ document.addEventListener('click', (e) => {
   }
   const chatPosBtn = e.target.closest('.settings-chatpos-btn');
   if(chatPosBtn){ setChatPosition(chatPosBtn.dataset.chatpos); return; }
+});
+
+// --- Panel order: hold-and-drag reordering (HTML5 drag-and-drop) ---
+// Delegated on the settings panel so this keeps working across every
+// renderSettings() re-render, without re-binding listeners each time.
+let draggedSectionId = null;
+document.addEventListener('dragstart', (e) => {
+  const row = e.target.closest('.settings-order-row');
+  if(!row) return;
+  draggedSectionId = row.dataset.id;
+  row.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', draggedSectionId); // Firefox requires data to be set to allow the drag
+});
+document.addEventListener('dragend', (e) => {
+  const row = e.target.closest('.settings-order-row');
+  if(row) row.classList.remove('dragging');
+  document.querySelectorAll('.settings-order-row.drag-over-top, .settings-order-row.drag-over-bottom')
+    .forEach(el => el.classList.remove('drag-over-top', 'drag-over-bottom'));
+  draggedSectionId = null;
+});
+document.addEventListener('dragover', (e) => {
+  const row = e.target.closest('.settings-order-row');
+  if(!row || !draggedSectionId || row.dataset.id === draggedSectionId) return;
+  e.preventDefault(); // required to allow a drop
+  e.dataTransfer.dropEffect = 'move';
+  const before = (e.clientY - row.getBoundingClientRect().top) < row.offsetHeight / 2;
+  row.classList.toggle('drag-over-top', before);
+  row.classList.toggle('drag-over-bottom', !before);
+});
+document.addEventListener('dragleave', (e) => {
+  const row = e.target.closest('.settings-order-row');
+  if(row) row.classList.remove('drag-over-top', 'drag-over-bottom');
+});
+document.addEventListener('drop', (e) => {
+  const row = e.target.closest('.settings-order-row');
+  if(!row || !draggedSectionId) return;
+  e.preventDefault();
+  const before = (e.clientY - row.getBoundingClientRect().top) < row.offsetHeight / 2;
+  reorderSection(draggedSectionId, row.dataset.id, !before);
 });
 
 // Apply saved theme/density immediately (before first render) and lay out
@@ -1169,7 +1233,9 @@ function mergedWarList(){
   const map = new Map();
   (state.warlog?.items || []).forEach(item => {
     if(!item.endTime || !isRegularWarEntry(item)) return;
-    map.set(item.endTime, {
+    const key = toEpochMs(item.endTime);
+    if(key == null) return;
+    map.set(key, {
       endTime: item.endTime, opponentName: item.opponent?.name || 'Unknown',
       teamSize: item.teamSize, result: item.result,
       ourStars: item.clan.stars, theirStars: item.opponent.stars
@@ -1177,21 +1243,24 @@ function mergedWarList(){
   });
   if(state.war && state.war.state === 'warEnded' && state.war.endTime && isRegularWarEntry(state.war)){
     const w = state.war;
-    map.set(w.endTime, {
+    const key = toEpochMs(w.endTime);
+    if(key != null) map.set(key, {
       endTime: w.endTime, opponentName: w.opponent.name, teamSize: w.teamSize,
       result: computeWarResult(w.clan, w.opponent), ourStars: w.clan.stars, theirStars: w.opponent.stars
     });
   }
   (state.warHistory || []).forEach(h => {
     // Defensive: also drop any already-archived rows saved before this filter existed.
-    if(!h.end_time || !h.opponent_name || map.has(h.end_time)) return;
-    map.set(h.end_time, {
+    if(!h.end_time || !h.opponent_name) return;
+    const key = toEpochMs(h.end_time);
+    if(key == null || map.has(key)) return;
+    map.set(key, {
       endTime: h.end_time, opponentName: h.opponent_name || 'Unknown',
       teamSize: h.team_size, result: h.result,
       ourStars: h.our_stars, theirStars: h.their_stars
     });
   });
-  return Array.from(map.values()).sort((a, b) => (b.endTime || '').localeCompare(a.endTime || ''));
+  return Array.from(map.values()).sort((a, b) => (toEpochMs(b.endTime) || 0) - (toEpochMs(a.endTime) || 0));
 }
 
 // Capital raid history — same idea. CoC's API only keeps the last few
@@ -1227,21 +1296,25 @@ function mergedCapitalList(){
   const map = new Map();
   (state.capital?.items || []).forEach(s => {
     if(!s.startTime) return;
-    map.set(s.startTime, {
+    const key = toEpochMs(s.startTime);
+    if(key == null) return;
+    map.set(key, {
       startTime: s.startTime, totalLoot: s.capitalTotalLoot,
       raidsCompleted: s.raidsCompleted, totalAttacks: s.totalAttacks,
       members: mapCapitalMembers(s.members)
     });
   });
   (state.capitalHistory || []).forEach(h => {
-    if(!h.start_time || map.has(h.start_time)) return;
-    map.set(h.start_time, {
+    if(!h.start_time) return;
+    const key = toEpochMs(h.start_time);
+    if(key == null || map.has(key)) return;
+    map.set(key, {
       startTime: h.start_time, totalLoot: h.total_loot,
       raidsCompleted: h.raids_completed, totalAttacks: h.total_attacks,
       members: h.members || []
     });
   });
-  return Array.from(map.values()).sort((a, b) => (b.startTime || '').localeCompare(a.startTime || ''));
+  return Array.from(map.values()).sort((a, b) => (toEpochMs(b.startTime) || 0) - (toEpochMs(a.startTime) || 0));
 }
 
 // --- Notebook, backed by Supabase, scoped per clan tag ---
@@ -2336,7 +2409,7 @@ async function sendChat(){
   try{
     const context = buildContext();
     const messages = [
-      { role: 'system', content: 'You are a sharp, concise Clash of Clans clan analyst. Answer using the clan data JSON given below and the conversation so far. Use real numbers and names from the data. If the data does not contain what is asked, say so plainly instead of guessing. IMPORTANT: for any count, total, or "how many" question, use the precomputed fields already provided (roleCounts, currentWar.attackSummary, currentWar.rosterSummary, each capital raid\'s participationSummary) instead of counting the raw member/attack arrays yourself — those fields are exact, and a number you calculate by hand from a long list is much more likely to be wrong than one already given to you. Only enumerate the raw arrays for listing/filtering questions that no precomputed field covers, and if you do, make sure any count you state matches the exact number of items you actually listed. Also note: a capital raid\'s "members" array ONLY contains players who attacked at least once — it never lists zero-attack members with a 0, they are simply absent from that array. Never conclude "everyone in the members list participated, so nobody had zero attacks" — that array was never a list of the full clan to begin with. Use the didNotParticipate field (present on the most recent raid only) to answer who had zero attacks. Similarly, currentWar.ourMembers ONLY contains the teamSize players selected for that war — it is never the full clan, so it can never be used to figure out who was left out of the war. Use currentWar.rosterSummary.notSelectedForWar for "who wasn\'t part of the war roster" questions, and keep that distinct from currentWar.attackSummary.membersWithZeroAttacks, which is about selected players who didn\'t attack. FORMATTING: double-check any figures or names against the data BEFORE you start writing your reply. If you do need to work through something or catch yourself about to state a wrong number, do all of that silently inside a single <thinking></thinking> block at the very start of your response, then close the tag and write ONLY the clean, correct, final answer after it — never write "wait", "let me correct that", "actually", or an earlier wrong value outside the thinking block. If no checking is needed, skip the thinking block entirely and just answer directly. Keep any <thinking> block short — a few sentences of reasoning at most. NEVER re-list, re-type, or manually recount every item in a members/attacks array inside <thinking> to verify a precomputed field; the precomputed fields (participatedAtLeastOnceCount, didNotParticipateCount, rosterSummary, attackSummary, roleCounts, etc.) are already exact and are computed separately from the raw arrays, so trust them as given rather than trying to re-derive them by hand. NAMES AND TAGS: every player and the clan itself has a display name and a separate #-tag (e.g. "mazz" vs "#GUL0GUURC") in the data — the tag exists only so you can look someone up unambiguously in the JSON, never to show the person. Refer to players and the clan by their plain name only. Do not write out anyone\'s #tag, and do not append it in parentheses after a name, in any answer — even if the underlying data lists dozens of players with their tags right next to their names. The only exception is if the person explicitly asks for a tag (for example, asking for someones tag directly). CONCISENESS: when asked to identify one player or a small handful (e.g. "who has the lowest donations", "who should we kick"), name just that player (or the tied few, or the requested count) directly — do not list or rank the entire roster to get there. Save full member-by-member breakdowns for when the person actually asks to see everyone (e.g. "list everyone\'s donations" or "rank the whole clan").' },
+      { role: 'system', content: 'You are a sharp, concise Clash of Clans clan analyst. Answer using the clan data JSON given below and the conversation so far. Use real numbers and names from the data. If the data does not contain what is asked, say so plainly instead of guessing. IMPORTANT: for any count, total, or "how many" question, use the precomputed fields already provided (roleCounts, currentWar.attackSummary, currentWar.rosterSummary, each capital raid\'s participationSummary) instead of counting the raw member/attack arrays yourself — those fields are exact, and a number you calculate by hand from a long list is much more likely to be wrong than one already given to you. Only enumerate the raw arrays for listing/filtering questions that no precomputed field covers, and if you do, make sure any count you state matches the exact number of items you actually listed. Also note: a capital raid\'s "members" array ONLY contains players who attacked at least once — it never lists zero-attack members with a 0, they are simply absent from that array. Never conclude "everyone in the members list participated, so nobody had zero attacks" — that array was never a list of the full clan to begin with. Use the didNotParticipate field (present on the most recent raid only) to answer who had zero attacks. Similarly, currentWar.ourMembers ONLY contains the teamSize players selected for that war — it is never the full clan, so it can never be used to figure out who was left out of the war. Use currentWar.rosterSummary.notSelectedForWar for "who wasn\'t part of the war roster" questions, and keep that distinct from currentWar.attackSummary.membersWithZeroAttacks, which is about selected players who didn\'t attack. FORMATTING: double-check any figures or names against the data BEFORE you start writing your reply. If you do need to work through something or catch yourself about to state a wrong number, do all of that silently inside a single <thinking></thinking> block at the very start of your response, then close the tag and write ONLY the clean, correct, final answer after it — never write "wait", "let me correct that", "actually", or an earlier wrong value outside the thinking block. If no checking is needed, skip the thinking block entirely and just answer directly. Your <thinking> block has a hard budget of 2-3 short sentences — naming which precomputed fields you\'ll use and what you\'re weighing is enough, that is NOT the place to work through each candidate. NEVER re-list, re-type, or manually recount every item in a members/attacks array inside <thinking> to verify a precomputed field, and NEVER walk through candidates one-by-one there either (e.g. for "who should we kick") — reasoning over many members belongs in the visible answer as a short comparison of the few that actually matter, not as an exhaustive pass over everyone inside <thinking>. Going over the thinking budget risks the whole reply being cut off before the real answer is even written, which helps no one. NAMES AND TAGS: every player and the clan itself has a display name and a separate #-tag (e.g. "mazz" vs "#GUL0GUURC") in the data — the tag exists only so you can look someone up unambiguously in the JSON, never to show the person. Refer to players and the clan by their plain name only. Do not write out anyone\'s #tag, and do not append it in parentheses after a name, in any answer — even if the underlying data lists dozens of players with their tags right next to their names. The only exception is if the person explicitly asks for a tag (for example, asking for someones tag directly). CONCISENESS: when asked to identify one player or a small handful (e.g. "who has the lowest donations", "who should we kick"), name just that player (or the tied few, or the requested count) directly — do not list or rank the entire roster to get there. Save full member-by-member breakdowns for when the person actually asks to see everyone (e.g. "list everyone\'s donations" or "rank the whole clan").' },
       { role: 'system', content: `Current clan data (JSON):\n${context}` },
       ...chatHistory,
       { role: 'user', content: question }
@@ -2347,7 +2420,7 @@ async function sendChat(){
       body: JSON.stringify({
         model: 'sarvam-105b',
         temperature: 0.3,
-        max_tokens: 2048,
+        max_tokens: 4096,
         reasoning_effort: null,
         messages
       })
