@@ -1,0 +1,17 @@
+{
+  "name": "clan-war-room",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local relay + dashboard for a Clash of Clans clan war room, with Supabase-backed history and a background attack-log poller.",
+  "main": "coc-local-proxy.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node coc-local-proxy.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5"
+  }
+}
