@@ -106,8 +106,14 @@
   .col-chat{ flex:1; min-width: 260px; display:flex; padding-left:12px; }
   @media (max-width: 900px){
     .split-area{ flex-direction:column; flex:initial; height:auto; }
-    .col-main{ overflow:visible; flex-basis:auto !important; padding-right:0; }
-    .col-chat{ height: 560px; padding-left:0; }
+    .col-main{ overflow:visible; flex-basis:auto !important; padding-right:0; order:2; }
+    .col-chat{ height: 560px; padding-left:0; order:3; }
+    /* Default: chat sits below all the panels (today's behavior). The
+       "AI chat position" setting can flip this to put it right under the
+       clan hero instead, so it doesn't take scrolling past everything to
+       reach on a phone or tablet. */
+    body.chat-position-top .col-main{ order:3; }
+    body.chat-position-top .col-chat{ order:2; }
   }
 
   .panel{ background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 20px; }
@@ -124,7 +130,7 @@
   .settings-row-order{ border-bottom: none; padding-bottom: 4px; }
   .settings-label{ font-size: 12.5px; color: var(--text-dim); font-weight: 600; }
   .settings-btns{ display:flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-  .settings-theme-btn.active, .settings-density-btn.active{ background: var(--gold); color: #17140d; border-color: var(--gold); }
+  .settings-theme-btn.active, .settings-density-btn.active, .settings-chatpos-btn.active{ background: var(--gold); color: #17140d; border-color: var(--gold); }
   .settings-order-list{ display:flex; flex-direction:column; gap: 6px; }
   .settings-order-row{ display:flex; align-items:center; justify-content:space-between; background: var(--bg-raised); border: 1px solid var(--panel-border); border-radius: 7px; padding: 8px 10px; font-size: 12.5px; color: var(--text); }
   .settings-order-btns{ display:flex; gap: 4px; }
@@ -181,6 +187,10 @@
   .chat-panel{ flex:1; display:flex; flex-direction:row; padding: 0; overflow:hidden; position:relative; min-width:0; }
   .chat-panel.expanded{
     position: fixed; inset: 20px; z-index: 500; box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+  }
+  @media (max-width: 700px){
+    .chat-panel.expanded{ inset: 8px; }
+    .chat-panel.expanded .chat-messages{ padding: 16px 10px; }
   }
   .chat-main{ flex:1; min-width:0; display:flex; flex-direction:column; }
   .chat-panel.expanded .chat-messages{ padding: 22px clamp(16px, 12%, 160px); }
@@ -290,10 +300,12 @@
     </div>
     <div class="nav-list">
       <button class="nav-item" data-target="secHome"><span class="nav-icon">🏠</span>Home</button>
+      <button class="nav-item nav-ai" data-mode="chat"><span class="nav-icon">💬</span>AI Chat</button>
       <button class="nav-item" data-target="secSummary"><span class="nav-icon">🛡️</span>Clan Summary Details</button>
       <button class="nav-item" data-target="secWar"><span class="nav-icon">⚔️</span>Ongoing War Result</button>
       <button class="nav-item" data-target="secInfo"><span class="nav-icon">🏰</span>Clan Info</button>
       <button class="nav-item" data-target="secCapital"><span class="nav-icon">🏛️</span>Ongoing Capital Raid</button>
+      <button class="nav-item" data-target="secAttackLog"><span class="nav-icon">📊</span>Attack Log</button>
       <button class="nav-item" data-target="secHistory"><span class="nav-icon">📜</span>Full History</button>
       <div class="nav-divider"></div>
       <button class="nav-item nav-notes" data-target="secNotes"><span class="nav-icon">📝</span>Notes</button>
@@ -578,6 +590,12 @@ function setDensity(density){
   renderSettings();
 }
 
+function setChatPosition(position){
+  document.body.classList.toggle('chat-position-top', position === 'top');
+  try{ localStorage.setItem('warroom_chat_position', position); }catch(e){}
+  renderSettings();
+}
+
 function renderSettings(){
   const p = $('#settingsPanel');
   if(!p) return;
@@ -615,6 +633,16 @@ function renderSettings(){
     </div>
     <div class="empty" style="padding-top:0;">${isLiveNow ? `Currently live — refreshing every ${pollSeconds}s.` : `Currently idle — checking every ${Math.round(IDLE_POLL_MS/60000)} min for something to go live.`}</div>`;
 
+  const chatPosition = localStorage.getItem('warroom_chat_position') === 'top' ? 'top' : 'bottom';
+  const chatPositionRow = `
+    <div class="settings-row">
+      <div class="settings-label">AI chat position on phone/tablet<br><span class="empty" style="padding:0;">Only affects the narrow, stacked layout — desktop keeps chat on the side</span></div>
+      <div class="settings-btns">
+        <button class="btn-ghost btn-small settings-chatpos-btn${chatPosition === 'top' ? ' active' : ''}" data-chatpos="top">Top (under clan info)</button>
+        <button class="btn-ghost btn-small settings-chatpos-btn${chatPosition === 'bottom' ? ' active' : ''}" data-chatpos="bottom">Bottom (default)</button>
+      </div>
+    </div>`;
+
   const orderRows = sectionOrder.map((id, i) => `
     <div class="settings-order-row">
       <span>${esc(SECTION_LABELS[id] || id)}</span>
@@ -628,6 +656,7 @@ function renderSettings(){
     ${themeRow}
     ${densityRow}
     ${pollRow}
+    ${chatPositionRow}
     <div class="settings-row settings-row-order">
       <div class="settings-label">Panel order</div>
       <div class="empty" style="padding:0;">Settings always stays last, below Notes.</div>
@@ -658,12 +687,15 @@ document.addEventListener('click', (e) => {
     }
     return;
   }
+  const chatPosBtn = e.target.closest('.settings-chatpos-btn');
+  if(chatPosBtn){ setChatPosition(chatPosBtn.dataset.chatpos); return; }
 });
 
 // Apply saved theme/density immediately (before first render) and lay out
 // sections in the saved order as soon as the dashboard's markup exists.
 document.documentElement.setAttribute('data-theme', localStorage.getItem('warroom_theme') || 'dark');
 document.body.setAttribute('data-density', localStorage.getItem('warroom_density') || 'normal');
+document.body.classList.toggle('chat-position-top', (localStorage.getItem('warroom_chat_position') || 'bottom') === 'top');
 applySectionOrder();
 
 function setStatus(msg, kind){
@@ -719,11 +751,18 @@ $('#navMenuBtn').addEventListener('click', () => {
 });
 $('#navBackdrop').addEventListener('click', closeNavSidebar);
 $('#closeNavBtn').addEventListener('click', closeNavSidebar);
-document.querySelectorAll('.nav-item[data-target]').forEach(item => {
+document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
+    closeNavSidebar();
+    if(item.dataset.mode === 'chat'){
+      // AI Chat gets its own dedicated full-screen view, not just a scroll
+      // to wherever the chat panel happens to sit on Home — this reuses the
+      // same expand/collapse mechanism as the ⤢ button in the chat header.
+      setChatExpanded(true);
+      return;
+    }
     const target = document.getElementById(item.dataset.target);
     if(target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    closeNavSidebar();
   });
 });
 
