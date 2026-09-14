@@ -1956,7 +1956,44 @@ function renderChips(){
   });
 }
 
-function buildContext(){
+// --- Phase 1: lightweight relevance filtering ----------------------------
+// A cheap keyword pass so a narrow question doesn't drag in every war,
+// every CWL season, every raid weekend, and every attack all at once.
+// Deliberately fails OPEN: if nothing matches, or the question doesn't
+// clearly point at just one area, MORE gets included, not less — a
+// heuristic this simple should never be the reason a real answer goes
+// missing. Members, role counts, current war, and notes are always
+// included in full regardless of this classification — they're small,
+// and too broadly useful to gate behind a keyword guess.
+const CONTEXT_KEYWORDS = {
+  war: /\b(war|attack(ed|ing|s)?|star|destruction|opponent|enemy|lineup|roster|team ?size)\b/i,
+  cwl: /\b(cwl|clan war league|league|round)\b/i,
+  capital: /\b(capital|raid|district|obstacle|loot|raid ?weekend)\b/i,
+  // Kicking/inactivity/donation questions genuinely depend on cross-category
+  // activity, not just the member list (which is always included anyway) —
+  // see where this is used below for why it pulls in war+cwl+capital too.
+  memberActivity: /\b(kick|inactive|inactivity|remove|removed|promot|demot|donat|activity|particip|role|leader|elder|co-?leader|trophies|town ?hall|th ?level|th\d)\b/i
+};
+
+function classifyQuestionCategories(question){
+  const q = question || '';
+  const activated = new Set();
+  if(CONTEXT_KEYWORDS.war.test(q)) activated.add('war');
+  if(CONTEXT_KEYWORDS.cwl.test(q)) activated.add('cwl');
+  if(CONTEXT_KEYWORDS.capital.test(q)) activated.add('capital');
+  if(CONTEXT_KEYWORDS.memberActivity.test(q)){
+    activated.add('war'); activated.add('cwl'); activated.add('capital');
+  }
+  // Fail open: nothing recognized at all -> include everything. A narrow
+  // guess here is worse than a slightly bigger prompt.
+  if(activated.size === 0){
+    activated.add('war'); activated.add('cwl'); activated.add('capital');
+  }
+  return activated;
+}
+
+function buildContext(question){
+  const activated = classifyQuestionCategories(question);
   const c = state.clan;
   const members = (c.memberList || []).map(m => ({
     name: m.name, tag: m.tag, role: ROLE_LABEL[m.role] || m.role, level: m.expLevel, trophies: m.trophies,
@@ -2035,70 +2072,141 @@ function buildContext(){
   // archived ones the roster has likely changed since (departures/joins),
   // so we don't claim a reliable non-participant list for those.
   const currentRoster = (c.memberList || []).map(m => ({ tag: m.tag, name: m.name }));
-  const recentCapitalRaids = mergedCapitalList().slice(0, 12).map((s, idx) => {
-    // A saved raid's members array can end up with the same player's tag
-    // appearing twice (e.g. if a snapshot got merged/re-saved mid-raid).
-    // Dedupe by tag (keep the last, most up-to-date entry for that tag)
-    // BEFORE computing anything, so the member list length, the
-    // participant count, and the roster diff below are all guaranteed to
-    // agree with each other. Entries with no tag (only possible on very
-    // old saved data) are kept as-is and not deduped.
-    const rawRaidMembers = s.members || [];
-    const dedupedByTag = new Map();
-    const untaggedMembers = [];
-    rawRaidMembers.forEach(m => {
-      if(m && m.tag) dedupedByTag.set(m.tag, m);
-      else if(m) untaggedMembers.push(m);
-    });
-    const raidMembers = [...dedupedByTag.values(), ...untaggedMembers];
-    const participantTags = new Set(dedupedByTag.keys());
-    const base = {
-      startTime: s.startTime,
-      totalLoot: s.totalLoot,
-      raidsCompleted: s.raidsCompleted,
-      totalAttacks: s.totalAttacks,
-      members: raidMembers,
-      participationSummary: {
-        note: "This raid's members list only includes players who attacked at least once — it never contains zero-attack members.",
-        participatedAtLeastOnceCount: raidMembers.length
-      }
-    };
-    if(idx === 0){
-      const nonParticipants = currentRoster.filter(m => !participantTags.has(m.tag));
-      base.participationSummary.totalCurrentClanMembers = currentRoster.length;
-      base.participationSummary.didNotParticipateCount = nonParticipants.length;
-      base.participationSummary.didNotParticipate = nonParticipants.map(m => ({ name: m.name, tag: m.tag }));
-      base.participationSummary.note += " didNotParticipate below is computed by cross-referencing against the CURRENT full clan roster, and is only reliable for this most recent raid weekend.";
-    }
-    return base;
-  });
+  const allCapitalRaids = mergedCapitalList();
+  const recentCapitalRaids = activated.has('capital')
+    ? allCapitalRaids.slice(0, 12).map((s, idx) => {
+        // A saved raid's members array can end up with the same player's tag
+        // appearing twice (e.g. if a snapshot got merged/re-saved mid-raid).
+        // Dedupe by tag (keep the last, most up-to-date entry for that tag)
+        // BEFORE computing anything, so the member list length, the
+        // participant count, and the roster diff below are all guaranteed to
+        // agree with each other. Entries with no tag (only possible on very
+        // old saved data) are kept as-is and not deduped.
+        const rawRaidMembers = s.members || [];
+        const dedupedByTag = new Map();
+        const untaggedMembers = [];
+        rawRaidMembers.forEach(m => {
+          if(m && m.tag) dedupedByTag.set(m.tag, m);
+          else if(m) untaggedMembers.push(m);
+        });
+        const raidMembers = [...dedupedByTag.values(), ...untaggedMembers];
+        const participantTags = new Set(dedupedByTag.keys());
+        const base = {
+          startTime: s.startTime,
+          totalLoot: s.totalLoot,
+          raidsCompleted: s.raidsCompleted,
+          totalAttacks: s.totalAttacks,
+          members: raidMembers,
+          participationSummary: {
+            note: "This raid's members list only includes players who attacked at least once — it never contains zero-attack members.",
+            participatedAtLeastOnceCount: raidMembers.length
+          }
+        };
+        if(idx === 0){
+          const nonParticipants = currentRoster.filter(m => !participantTags.has(m.tag));
+          base.participationSummary.totalCurrentClanMembers = currentRoster.length;
+          base.participationSummary.didNotParticipateCount = nonParticipants.length;
+          base.participationSummary.didNotParticipate = nonParticipants.map(m => ({ name: m.name, tag: m.tag }));
+          base.participationSummary.note += " didNotParticipate below is computed by cross-referencing against the CURRENT full clan roster, and is only reliable for this most recent raid weekend.";
+        }
+        return base;
+      })
+    // Question didn't look capital/raid-related — skip the per-member
+    // rosters (the expensive part) and just give top-level totals, so the
+    // model still knows raids happened and roughly how they went, without
+    // paying for detail nothing here asked for.
+    : allCapitalRaids.slice(0, 12).map(s => ({
+        startTime: s.startTime, totalLoot: s.totalLoot, raidsCompleted: s.raidsCompleted, totalAttacks: s.totalAttacks,
+        note: "Per-member detail omitted as not relevant to this question — ask about capital raids specifically for the full breakdown."
+      }));
+
+  const allWars = mergedWarList();
+  const recentWars = activated.has('war')
+    ? allWars.slice(0, 30).map(w => ({ opponent: w.opponentName, result: w.result, ourStars: w.ourStars, theirStars: w.theirStars, teamSize: w.teamSize, endTime: w.endTime }))
+    // Not war-related — a compact record-only summary instead of all 30 wars.
+    : (() => {
+        const tally = allWars.reduce((acc, w) => { acc[w.result] = (acc[w.result] || 0) + 1; return acc; }, {});
+        return {
+          summaryOnly: true,
+          note: "Individual war-by-war detail omitted as not relevant to this question — ask about wars specifically for the full list.",
+          record: { wins: tally.win || 0, losses: tally.lose || 0, ties: tally.tie || 0 },
+          mostRecent: allWars[0] ? { opponent: allWars[0].opponentName, result: allWars[0].result, endTime: allWars[0].endTime } : null
+        };
+      })();
+
+  // recentAttacks pulls from whatever the server's /attack-log GET already
+  // returned into state.attackLog — that endpoint itself caps at 500 rows
+  // (see lib/attackLog.js), so on a long-running clan this count can be a
+  // floor rather than the true grand total. Not fixing that cap here — out
+  // of scope for this pass — just not overclaiming precision around it.
+  const allAttacks = state.attackLog || [];
+  // Only the contexts (war/cwl/capital) this question actually activated —
+  // an attack row is only useful alongside the war/CWL/raid it belongs to,
+  // so it follows the same gating as those sections above.
+  const relevantAttacks = allAttacks.filter(a => activated.has(a.context));
+  const recentAttacks = relevantAttacks.slice(0, 150).map(a => ({
+    context: a.context, contextRef: a.context_ref,
+    attacker: a.attacker_name || a.attacker_tag, target: a.defender_name || a.defender_tag,
+    stars: a.stars, destructionPercent: a.destruction_percent, recordedAt: a.recorded_at
+  }));
+
+  const cwlActivated = activated.has('cwl');
+  const clanWarLeague = state.cwl
+    ? (cwlActivated
+        ? {
+            season: state.cwl.season,
+            rounds: state.cwl.rounds.map(r => ({
+              round: r.round, state: r.state,
+              us: r.us, opponent: r.opponent,
+              ourMembers: r.ourMembers
+            }))
+          }
+        // Not CWL-related — record only, no per-round member breakdowns.
+        : {
+            season: state.cwl.season,
+            summaryOnly: true,
+            note: "Per-round member detail omitted as not relevant to this question — ask about CWL specifically for the full breakdown.",
+            rounds: state.cwl.rounds.map(r => ({ round: r.round, state: r.state, us: { name: r.us?.name, stars: r.us?.stars }, opponent: { name: r.opponent?.name, stars: r.opponent?.stars } }))
+          })
+    : null;
+  const cwlHistoryFull = (state.cwlHistory || []).filter(s => !state.cwl || s.season !== state.cwl.season);
+  const cwlHistory = cwlActivated
+    ? cwlHistoryFull.map(s => ({
+        season: s.season,
+        rounds: s.rounds.map(r => ({ round: r.round, us: r.us, opponent: r.opponent, result: cwlRoundResult(r) }))
+      }))
+    // Not CWL-related — just season-level win/loss records, not every round.
+    : cwlHistoryFull.map(s => {
+        const tally = s.rounds.reduce((acc, r) => { const res = cwlRoundResult(r); acc[res] = (acc[res] || 0) + 1; return acc; }, {});
+        return { season: s.season, record: { wins: tally.win || 0, losses: tally.lose || 0, ties: tally.tie || 0 } };
+      });
 
   const ctx = {
     clan: { name: c.name, tag: c.tag, level: c.clanLevel, points: c.clanPoints, warWinStreak: c.warWinStreak, warWins: c.warWins, warLosses: c.warLosses, warTies: c.warTies, capitalHallLevel: c.clanCapital?.capitalHallLevel },
     members,
     roleCounts,
     currentWar,
-    clanWarLeague: state.cwl ? {
-      season: state.cwl.season,
-      rounds: state.cwl.rounds.map(r => ({
-        round: r.round, state: r.state,
-        us: r.us, opponent: r.opponent,
-        ourMembers: r.ourMembers
-      }))
-    } : null,
-    cwlHistory: (state.cwlHistory || [])
-      .filter(s => !state.cwl || s.season !== state.cwl.season)
-      .map(s => ({
-        season: s.season,
-        rounds: s.rounds.map(r => ({ round: r.round, us: r.us, opponent: r.opponent, result: cwlRoundResult(r) }))
-      })),
-    recentWars: mergedWarList().slice(0, 30).map(w => ({ opponent: w.opponentName, result: w.result, ourStars: w.ourStars, theirStars: w.theirStars, teamSize: w.teamSize, endTime: w.endTime })),
+    clanWarLeague,
+    cwlHistory,
+    // totalXArchived vs xIncludedInContext: when these differ, the array
+    // below is only the most recent slice, not the whole history. See the
+    // TRUNCATION instruction in the system prompt (sendChat) for how the
+    // model is told to use these.
+    totalWarsArchived: allWars.length,
+    warsIncludedInContext: Array.isArray(recentWars) ? recentWars.length : 0,
+    recentWars,
+    totalCapitalRaidsArchived: allCapitalRaids.length,
+    raidsIncludedInContext: recentCapitalRaids.length,
     recentCapitalRaids,
-    recentAttacks: (state.attackLog || []).slice(0, 150).map(a => ({
-      context: a.context, contextRef: a.context_ref,
-      attacker: a.attacker_name || a.attacker_tag, target: a.defender_name || a.defender_tag,
-      stars: a.stars, destructionPercent: a.destruction_percent, recordedAt: a.recorded_at
-    })),
+    totalAttacksArchived: allAttacks.length,
+    attacksIncludedInContext: recentAttacks.length,
+    // Relevance filtering (see classifyQuestionCategories above): which of
+    // war/cwl/capital got full detail for THIS question. Sections left out
+    // of this list still appear above, just as a lighter summary rather
+    // than full detail — never fully removed.
+    categoriesIncludedInFullDetail: Array.from(activated),
+    attacksOmittedByCategoryFilterCount: allAttacks.length - relevantAttacks.length,
+    recentAttacks,
     notes: (state.notes || []).map(n => ({ content: n.content, createdAt: n.created_at }))
   };
   return JSON.stringify(ctx);
@@ -2428,9 +2536,9 @@ async function sendChat(){
   const thinkingMsg = appendMsg('ai', 'Thinking...');
 
   try{
-    const context = buildContext();
+    const context = buildContext(question);
     const messages = [
-      { role: 'system', content: 'You are a sharp, concise Clash of Clans clan analyst. Answer using the clan data JSON given below and the conversation so far. Use real numbers and names from the data. If the data does not contain what is asked, say so plainly instead of guessing. IMPORTANT: for any count, total, or "how many" question, use the precomputed fields already provided (roleCounts, currentWar.attackSummary, currentWar.rosterSummary, each capital raid\'s participationSummary) instead of counting the raw member/attack arrays yourself — those fields are exact, and a number you calculate by hand from a long list is much more likely to be wrong than one already given to you. Only enumerate the raw arrays for listing/filtering questions that no precomputed field covers, and if you do, make sure any count you state matches the exact number of items you actually listed. Also note: a capital raid\'s "members" array ONLY contains players who attacked at least once — it never lists zero-attack members with a 0, they are simply absent from that array. Never conclude "everyone in the members list participated, so nobody had zero attacks" — that array was never a list of the full clan to begin with. Use the didNotParticipate field (present on the most recent raid only) to answer who had zero attacks. Similarly, currentWar.ourMembers ONLY contains the teamSize players selected for that war — it is never the full clan, so it can never be used to figure out who was left out of the war. Use currentWar.rosterSummary.notSelectedForWar for "who wasn\'t part of the war roster" questions, and keep that distinct from currentWar.attackSummary.membersWithZeroAttacks, which is about selected players who didn\'t attack. FORMATTING: double-check any figures or names against the data BEFORE you start writing your reply. If you do need to work through something or catch yourself about to state a wrong number, do all of that silently inside a single <thinking></thinking> block at the very start of your response, then close the tag and write ONLY the clean, correct, final answer after it — never write "wait", "let me correct that", "actually", or an earlier wrong value outside the thinking block. If no checking is needed, skip the thinking block entirely and just answer directly. Your <thinking> block has a hard budget of 2-3 short sentences — naming which precomputed fields you\'ll use and what you\'re weighing is enough, that is NOT the place to work through each candidate. NEVER re-list, re-type, or manually recount every item in a members/attacks array inside <thinking> to verify a precomputed field, and NEVER walk through candidates one-by-one there either (e.g. for "who should we kick") — reasoning over many members belongs in the visible answer as a short comparison of the few that actually matter, not as an exhaustive pass over everyone inside <thinking>. Going over the thinking budget risks the whole reply being cut off before the real answer is even written, which helps no one. NAMES AND TAGS: every player and the clan itself has a display name and a separate #-tag (e.g. "mazz" vs "#GUL0GUURC") in the data — the tag exists only so you can look someone up unambiguously in the JSON, never to show the person. Refer to players and the clan by their plain name only. Do not write out anyone\'s #tag, and do not append it in parentheses after a name, in any answer — even if the underlying data lists dozens of players with their tags right next to their names. The only exception is if the person explicitly asks for a tag (for example, asking for someones tag directly). CONCISENESS: when asked to identify one player or a small handful (e.g. "who has the lowest donations", "who should we kick"), name just that player (or the tied few, or the requested count) directly — do not list or rank the entire roster to get there. Save full member-by-member breakdowns for when the person actually asks to see everyone (e.g. "list everyone\'s donations" or "rank the whole clan").' },
+      { role: 'system', content: 'You are a sharp, concise Clash of Clans clan analyst. Answer using the clan data JSON given below and the conversation so far. Use real numbers and names from the data. If the data does not contain what is asked, say so plainly instead of guessing. IMPORTANT: for any count, total, or "how many" question, use the precomputed fields already provided (roleCounts, currentWar.attackSummary, currentWar.rosterSummary, each capital raid\'s participationSummary) instead of counting the raw member/attack arrays yourself — those fields are exact, and a number you calculate by hand from a long list is much more likely to be wrong than one already given to you. Only enumerate the raw arrays for listing/filtering questions that no precomputed field covers, and if you do, make sure any count you state matches the exact number of items you actually listed. Also note: a capital raid\'s "members" array ONLY contains players who attacked at least once — it never lists zero-attack members with a 0, they are simply absent from that array. Never conclude "everyone in the members list participated, so nobody had zero attacks" — that array was never a list of the full clan to begin with. Use the didNotParticipate field (present on the most recent raid only) to answer who had zero attacks. Similarly, currentWar.ourMembers ONLY contains the teamSize players selected for that war — it is never the full clan, so it can never be used to figure out who was left out of the war. Use currentWar.rosterSummary.notSelectedForWar for "who wasn\'t part of the war roster" questions, and keep that distinct from currentWar.attackSummary.membersWithZeroAttacks, which is about selected players who didn\'t attack. FORMATTING: double-check any figures or names against the data BEFORE you start writing your reply. If you do need to work through something or catch yourself about to state a wrong number, do all of that silently inside a single <thinking></thinking> block at the very start of your response, then close the tag and write ONLY the clean, correct, final answer after it — never write "wait", "let me correct that", "actually", or an earlier wrong value outside the thinking block. If no checking is needed, skip the thinking block entirely and just answer directly. Your <thinking> block has a hard budget of 2-3 short sentences — naming which precomputed fields you\'ll use and what you\'re weighing is enough, that is NOT the place to work through each candidate. NEVER re-list, re-type, or manually recount every item in a members/attacks array inside <thinking> to verify a precomputed field, and NEVER walk through candidates one-by-one there either (e.g. for "who should we kick") — reasoning over many members belongs in the visible answer as a short comparison of the few that actually matter, not as an exhaustive pass over everyone inside <thinking>. Going over the thinking budget risks the whole reply being cut off before the real answer is even written, which helps no one. NAMES AND TAGS: every player and the clan itself has a display name and a separate #-tag (e.g. "mazz" vs "#GUL0GUURC") in the data — the tag exists only so you can look someone up unambiguously in the JSON, never to show the person. Refer to players and the clan by their plain name only. Do not write out anyone\'s #tag, and do not append it in parentheses after a name, in any answer — even if the underlying data lists dozens of players with their tags right next to their names. The only exception is if the person explicitly asks for a tag (for example, asking for someones tag directly). CONCISENESS: when asked to identify one player or a small handful (e.g. "who has the lowest donations", "who should we kick"), name just that player (or the tied few, or the requested count) directly — do not list or rank the entire roster to get there. Save full member-by-member breakdowns for when the person actually asks to see everyone (e.g. "list everyone\'s donations" or "rank the whole clan"). TRUNCATION: recentWars, recentCapitalRaids, and recentAttacks are each capped to only the most recent entries, not the full archive. Right next to each one is a total-vs-included pair (totalWarsArchived/warsIncludedInContext, totalCapitalRaidsArchived/raidsIncludedInContext, totalAttacksArchived/attacksIncludedInContext). Before answering anything that could plausibly reach further back than what is included — a specific past month, "our first war", a raid weekend from a while ago, or similar — check whether the total is bigger than the included count for that array. If it is, say plainly that you only have the most recent N of M total and that the answer might fall outside that window, instead of answering as if the archive were complete. An item\'s absence from one of these arrays is never proof it did not happen — it may simply be older than what was included this time. RELEVANCE FILTERING: to keep prompts smaller, clanWarLeague, cwlHistory, recentWars, and recentCapitalRaids are each given to you at FULL per-item detail only for the categories (war/cwl/capital) that categoriesIncludedInFullDetail lists as relevant to this specific question — categories not in that list still appear, just as a lighter summary (record totals, most-recent-only, or similar) instead of a full breakdown, and are marked with a "summaryOnly" or "note" field saying so. recentAttacks is filtered the same way, and attacksOmittedByCategoryFilterCount tells you how many were left out. This is a simple keyword guess, not a certainty — if the person\'s question turns out to need detail from a category that only got a summary (for example the classifier missed a war-related word, or the question is genuinely about more than one area), say so plainly and answer from the summary\'s totals rather than inventing specifics that were not included, and suggest they ask about that category directly to get the full breakdown.' },
       { role: 'system', content: `Current clan data (JSON):\n${context}` },
       ...chatHistory,
       { role: 'user', content: question }
