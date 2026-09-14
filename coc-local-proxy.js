@@ -11,7 +11,7 @@ require('dotenv').config();
 
 const COC_TOKEN = process.env.COC_TOKEN;
 const SARVAM_TOKEN = process.env.SARVAM_TOKEN;
-const GEMINI_TOKEN = process.env.GEMINI_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 const http = require("http");
 const https = require("https");
@@ -129,22 +129,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Gemini has a different request/response shape than Sarvam's OpenAI-style
-  // API, so this route accepts the same { messages, temperature, max_tokens }
-  // body the frontend already sends and hands back the same
-  // { choices: [{ message, finish_reason }] } shape Sarvam returns —
-  // see lib/geminiProxy.js for the translation.
+  // Gemini's request/response shape is nothing like Sarvam's OpenAI-compatible
+  // one, so unlike /sarvam/chat above (a byte-for-byte pass-through proxy),
+  // this route actually has to parse the body and translate both ways —
+  // that's what lib/geminiProxy.js's callGemini() does. war-room.html sends
+  // the exact same { messages, temperature, max_tokens, tools } shape either
+  // way, and gets the exact same { choices: [...] } shape back either way.
   if (req.url === "/gemini/chat") {
-    if (!GEMINI_TOKEN) { sendJson(res, 500, { error: "GEMINI_TOKEN is not set on the server." }); return; }
+    if (!GEMINI_API_KEY) { sendJson(res, 500, { error: "GEMINI_API_KEY is not set on the server." }); return; }
     try {
       const raw = await readBody(req);
       let body;
       try { body = JSON.parse(raw.toString("utf8") || "{}"); }
       catch (e) { sendJson(res, 400, { error: "Invalid JSON body" }); return; }
-      const result = await callGemini(GEMINI_TOKEN, {
-        messages: body.messages || [],
+      const result = await callGemini(GEMINI_API_KEY, {
+        messages: body.messages,
         temperature: body.temperature,
         maxOutputTokens: body.max_tokens,
+        tools: body.tools,
+        model: body.model,
       });
       sendJson(res, 200, result);
     } catch (err) {
@@ -616,8 +619,8 @@ server.listen(PORT, () => {
   if (!COC_TOKEN || !SARVAM_TOKEN) {
     console.log("\n⚠️  COC_TOKEN and/or SARVAM_TOKEN are missing — set them in your .env file (local) or your host's environment variables (Render).\n");
   }
-  if (!GEMINI_TOKEN) {
-    console.log("ℹ️  GEMINI_TOKEN is not set — the Gemini option in the chat will show an error until it's added (Sarvam still works fine without it).\n");
+  if (!GEMINI_API_KEY) {
+    console.log("ℹ️  GEMINI_API_KEY is not set — the Gemini option in the dashboard's provider switch will return a 500 until it's added to your .env (or Render env vars).\n");
   }
   startBackgroundPolling();
 });
