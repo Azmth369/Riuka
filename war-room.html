@@ -774,8 +774,12 @@ applySectionOrder();
 // --- AI provider switch (Sarvam / Gemini) — persisted like the other local prefs ---
 let aiProvider = localStorage.getItem('warroom_ai_provider') || 'sarvam';
 const AI_PROVIDER_CONFIG = {
-  sarvam: { endpoint: '/sarvam/chat', model: 'sarvam-105b', label: 'Sarvam' },
-  gemini: { endpoint: '/gemini/chat', model: 'gemini-3.6-flash', label: 'Gemini' },
+  sarvam: { endpoint: '/sarvam/chat', model: 'sarvam-105b', label: 'Sarvam', supportsTools: true },
+  // lib/geminiProxy.js on the server translates our OpenAI-shaped
+  // { messages, tools } into Gemini's contents/functionDeclarations shape
+  // and translates its functionCall responses back into OpenAI-shaped
+  // tool_calls, so this can now be true too.
+  gemini: { endpoint: '/gemini/chat', model: 'gemini-3.6-flash', label: 'Gemini', supportsTools: true },
 };
 $('#aiProviderSelect').value = aiProvider;
 $('#aiProviderSelect').addEventListener('change', (e) => {
@@ -2096,6 +2100,138 @@ async function findTargetedLookup(question){
 }
 
 
+// --- Phase 3: give the model tools instead of guessing what to prefetch ---
+// Phase 2's findTargetedLookup() above only catches a handful of hand-coded
+// patterns (a month name, "first war", "against <opponent>"). These tools
+// let the model ask for exactly what it needs for ANY question, by calling
+// back into the same full-archive helpers Phase 2 already uses
+// (mergedWarList/mergedCapitalList/state.notes/fetchAttacksFor) — nothing
+// new is added to the server, and nothing about Phase 0-2 changes.
+//
+// Wired for both providers now. Sarvam's endpoint (coc-local-proxy.js's
+// /sarvam/chat) is a byte-for-byte pass-through proxy — a `tools` field in
+// the request and any `tool_calls` in the response travel through it
+// untouched. Gemini's shape is structurally different (functionDeclarations/
+// functionCall instead of tools/tool_calls), so /gemini/chat's route
+// actually translates both ways via lib/geminiProxy.js's callGemini() —
+// this page still only ever sends/receives the one OpenAI-style shape
+// either way. Tools are only sent when the selected provider opts in via
+// AI_PROVIDER_CONFIG's supportsTools flag.
+const TOOL_DEFINITIONS = [
+  {
+    type: 'function',
+    function: {
+      name: 'search_war_history',
+      description: "Search the clan's COMPLETE archived regular-war history (not just the recent window already included in context) by opponent name and/or a specific month/year. Use this for any war reference that might be older than what's already in context, or that wasn't already caught by a targetedLookup above.",
+      parameters: {
+        type: 'object',
+        properties: {
+          opponentContains: { type: 'string', description: 'Case-insensitive substring to match against the opponent clan name. Omit to not filter by opponent.' },
+          year: { type: 'integer', description: 'Four-digit year to filter to, e.g. 2026. Omit to search all years.' },
+          month: { type: 'integer', description: 'Month number 1-12 to filter to. Omit to search all months.' },
+          limit: { type: 'integer', description: 'Max number of matching wars to return, most recent first. Default 20.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_capital_raids',
+      description: "Search the clan's COMPLETE archived capital raid weekend history (not just the recent window already included in context) by month/year. Use this for any raid weekend reference that might be older than what's already in context.",
+      parameters: {
+        type: 'object',
+        properties: {
+          year: { type: 'integer', description: 'Four-digit year to filter to. Omit to search all years.' },
+          month: { type: 'integer', description: 'Month number 1-12 to filter to. Omit to search all months.' },
+          limit: { type: 'integer', description: 'Max number of matching raid weekends to return, most recent first. Default 12.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_notes',
+      description: "Search every note ever saved in this clan's notebook by keyword and/or month/year. Notes are already fully included in context today, so this mainly helps pin down a keyword-specific match once the notebook gets large.",
+      parameters: {
+        type: 'object',
+        properties: {
+          keyword: { type: 'string', description: 'Case-insensitive substring to search for inside note text. Omit to not filter by keyword.' },
+          year: { type: 'integer', description: 'Four-digit year the note was created in. Omit to search all years.' },
+          month: { type: 'integer', description: 'Month number 1-12 the note was created in. Omit to search all months.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_attack_details',
+      description: "Get the full individual-attack breakdown for one specific war, CWL round, or capital raid weekend, identified by its context and contextRef (both given alongside that war/raid wherever it appears in the data — e.g. a war's endTime, a raid's startTime, or a search_war_history/search_capital_raids result). Use this when a question needs attack-by-attack detail for something that only appears as a summary elsewhere.",
+      parameters: {
+        type: 'object',
+        properties: {
+          context: { type: 'string', enum: ['war', 'cwl', 'capital'], description: 'Which kind of attack log to fetch.' },
+          contextRef: { type: 'string', description: "The war's endTime, the raid's startTime, or the CWL round reference, exactly as it appears elsewhere in the data." }
+        },
+        required: ['context', 'contextRef']
+      }
+    }
+  }
+];
+
+// Handles both CoC's raw "YYYYMMDDT..." strings and Supabase's ISO timestamps.
+function monthYearMatch(dateStr, year, month){
+  if(!dateStr) return false;
+  const y = dateStr.slice(0, 4);
+  const m = /^\d{8}T/.test(dateStr) ? dateStr.slice(4, 6) : dateStr.slice(5, 7);
+  if(year && y !== String(year)) return false;
+  if(month && m !== String(month).padStart(2, '0')) return false;
+  return true;
+}
+
+const TOOL_HANDLERS = {
+  async search_war_history({ opponentContains, year, month, limit } = {}){
+    const needle = (opponentContains || '').toLowerCase();
+    const matches = mergedWarList().filter(w =>
+      (!needle || (w.opponentName || '').toLowerCase().includes(needle)) &&
+      (!year && !month ? true : monthYearMatch(w.endTime, year, month))
+    );
+    return { totalMatched: matches.length, wars: matches.slice(0, limit || 20) };
+  },
+  async search_capital_raids({ year, month, limit } = {}){
+    const matches = mergedCapitalList().filter(r => (!year && !month) ? true : monthYearMatch(r.startTime, year, month));
+    return {
+      totalMatched: matches.length,
+      raids: matches.slice(0, limit || 12).map(r => ({
+        startTime: r.startTime, totalLoot: r.totalLoot, raidsCompleted: r.raidsCompleted, totalAttacks: r.totalAttacks,
+        note: "Per-member detail omitted here — call get_attack_details with context:'capital' and this startTime as contextRef for attack-by-attack detail."
+      }))
+    };
+  },
+  async search_notes({ keyword, year, month } = {}){
+    const needle = (keyword || '').toLowerCase();
+    const matches = (state.notes || []).filter(n => {
+      if(needle && !(n.content || '').toLowerCase().includes(needle)) return false;
+      if((year || month) && !monthYearMatch(n.created_at, year, month)) return false;
+      return true;
+    });
+    return { totalMatched: matches.length, notes: matches.map(n => ({ content: n.content, createdAt: n.created_at })) };
+  },
+  async get_attack_details({ context, contextRef } = {}){
+    if(!context || !contextRef) return { error: 'context and contextRef are both required.' };
+    const rows = await fetchAttacksFor(context, contextRef);
+    return {
+      context, contextRef, attackCount: rows.length,
+      attacks: rows.map(a => ({
+        attacker: a.attacker_name || a.attacker_tag, target: a.defender_name || a.defender_tag,
+        stars: a.stars, destructionPercent: a.destruction_percent, recordedAt: a.recorded_at
+      }))
+    };
+  }
+};
+
 async function buildContext(question){
   const activated = classifyQuestionCategories(question);
   const c = state.clan;
@@ -2649,30 +2785,59 @@ async function sendChat(){
   try{
     const context = await buildContext(question);
     const messages = [
-      { role: 'system', content: 'You are a sharp, concise Clash of Clans clan analyst. Answer using the clan data JSON given below and the conversation so far. Use real numbers and names from the data. If the data does not contain what is asked, say so plainly instead of guessing. IMPORTANT: for any count, total, or "how many" question, use the precomputed fields already provided (roleCounts, currentWar.attackSummary, currentWar.rosterSummary, each capital raid\'s participationSummary) instead of counting the raw member/attack arrays yourself — those fields are exact, and a number you calculate by hand from a long list is much more likely to be wrong than one already given to you. Only enumerate the raw arrays for listing/filtering questions that no precomputed field covers, and if you do, make sure any count you state matches the exact number of items you actually listed. Also note: a capital raid\'s "members" array ONLY contains players who attacked at least once — it never lists zero-attack members with a 0, they are simply absent from that array. Never conclude "everyone in the members list participated, so nobody had zero attacks" — that array was never a list of the full clan to begin with. Use the didNotParticipate field (present on the most recent raid only) to answer who had zero attacks. Similarly, currentWar.ourMembers ONLY contains the teamSize players selected for that war — it is never the full clan, so it can never be used to figure out who was left out of the war. Use currentWar.rosterSummary.notSelectedForWar for "who wasn\'t part of the war roster" questions, and keep that distinct from currentWar.attackSummary.membersWithZeroAttacks, which is about selected players who didn\'t attack. FORMATTING: double-check any figures or names against the data BEFORE you start writing your reply. If you do need to work through something or catch yourself about to state a wrong number, do all of that silently inside a single <thinking></thinking> block at the very start of your response, then close the tag and write ONLY the clean, correct, final answer after it — never write "wait", "let me correct that", "actually", or an earlier wrong value outside the thinking block. If no checking is needed, skip the thinking block entirely and just answer directly. Your <thinking> block has a hard budget of 2-3 short sentences — naming which precomputed fields you\'ll use and what you\'re weighing is enough, that is NOT the place to work through each candidate. NEVER re-list, re-type, or manually recount every item in a members/attacks array inside <thinking> to verify a precomputed field, and NEVER walk through candidates one-by-one there either (e.g. for "who should we kick") — reasoning over many members belongs in the visible answer as a short comparison of the few that actually matter, not as an exhaustive pass over everyone inside <thinking>. Going over the thinking budget risks the whole reply being cut off before the real answer is even written, which helps no one. NAMES AND TAGS: every player and the clan itself has a display name and a separate #-tag (e.g. "mazz" vs "#GUL0GUURC") in the data — the tag exists only so you can look someone up unambiguously in the JSON, never to show the person. Refer to players and the clan by their plain name only. Do not write out anyone\'s #tag, and do not append it in parentheses after a name, in any answer — even if the underlying data lists dozens of players with their tags right next to their names. The only exception is if the person explicitly asks for a tag (for example, asking for someones tag directly). CONCISENESS: when asked to identify one player or a small handful (e.g. "who has the lowest donations", "who should we kick"), name just that player (or the tied few, or the requested count) directly — do not list or rank the entire roster to get there. Save full member-by-member breakdowns for when the person actually asks to see everyone (e.g. "list everyone\'s donations" or "rank the whole clan"). TRUNCATION: recentWars, recentCapitalRaids, and recentAttacks are each capped to only the most recent entries, not the full archive. Right next to each one is a total-vs-included pair (totalWarsArchived/warsIncludedInContext, totalCapitalRaidsArchived/raidsIncludedInContext, totalAttacksArchived/attacksIncludedInContext). Before answering anything that could plausibly reach further back than what is included — a specific past month, "our first war", a raid weekend from a while ago, or similar — check whether the total is bigger than the included count for that array. If it is, say plainly that you only have the most recent N of M total and that the answer might fall outside that window, instead of answering as if the archive were complete. An item\'s absence from one of these arrays is never proof it did not happen — it may simply be older than what was included this time. RELEVANCE FILTERING: to keep prompts smaller, clanWarLeague, cwlHistory, recentWars, and recentCapitalRaids are each given to you at FULL per-item detail only for the categories (war/cwl/capital) that categoriesIncludedInFullDetail lists as relevant to this specific question — categories not in that list still appear, just as a lighter summary (record totals, most-recent-only, or similar) instead of a full breakdown, and are marked with a "summaryOnly" or "note" field saying so. recentAttacks is filtered the same way, and attacksOmittedByCategoryFilterCount tells you how many were left out. This is a simple keyword guess, not a certainty — if the person\'s question turns out to need detail from a category that only got a summary (for example the classifier missed a war-related word, or the question is genuinely about more than one area), say so plainly and answer from the summary\'s totals rather than inventing specifics that were not included, and suggest they ask about that category directly to get the full breakdown. TARGETED LOOKUP: when the question names a specific month, an opponent, or says something like "first war"/"earliest war"/"first raid"/"earliest raid", the app searches the COMPLETE archive for it (not just the windowed arrays above) and includes the result as targetedLookup, with a found: true/false flag. When targetedLookup is present and found is true, treat matchedWars/matchedCapitalRaids/matchedNotes/matchedAttacks inside it as the authoritative, complete answer for that specific reference — prefer it over recentWars/recentCapitalRaids, which may not include it at all. When targetedLookup is present and found is false, the full archive was actually checked and nothing matched — say so plainly and directly (e.g. "I don\'t see a war against that opponent in the archive"), rather than hedging about incomplete data or guessing from the windowed arrays; this is a real negative result, not a truncation gap. When targetedLookup is absent entirely, the question did not contain a reference specific enough to search for directly, so fall back to the TRUNCATION guidance above instead.' },
+      { role: 'system', content: 'You are a sharp, concise Clash of Clans clan analyst. Answer using the clan data JSON given below and the conversation so far. Use real numbers and names from the data. If the data does not contain what is asked, say so plainly instead of guessing. IMPORTANT: for any count, total, or "how many" question, use the precomputed fields already provided (roleCounts, currentWar.attackSummary, currentWar.rosterSummary, each capital raid\'s participationSummary) instead of counting the raw member/attack arrays yourself — those fields are exact, and a number you calculate by hand from a long list is much more likely to be wrong than one already given to you. Only enumerate the raw arrays for listing/filtering questions that no precomputed field covers, and if you do, make sure any count you state matches the exact number of items you actually listed. Also note: a capital raid\'s "members" array ONLY contains players who attacked at least once — it never lists zero-attack members with a 0, they are simply absent from that array. Never conclude "everyone in the members list participated, so nobody had zero attacks" — that array was never a list of the full clan to begin with. Use the didNotParticipate field (present on the most recent raid only) to answer who had zero attacks. Similarly, currentWar.ourMembers ONLY contains the teamSize players selected for that war — it is never the full clan, so it can never be used to figure out who was left out of the war. Use currentWar.rosterSummary.notSelectedForWar for "who wasn\'t part of the war roster" questions, and keep that distinct from currentWar.attackSummary.membersWithZeroAttacks, which is about selected players who didn\'t attack. FORMATTING: double-check any figures or names against the data BEFORE you start writing your reply. If you do need to work through something or catch yourself about to state a wrong number, do all of that silently inside a single <thinking></thinking> block at the very start of your response, then close the tag and write ONLY the clean, correct, final answer after it — never write "wait", "let me correct that", "actually", or an earlier wrong value outside the thinking block. If no checking is needed, skip the thinking block entirely and just answer directly. Your <thinking> block has a hard budget of 2-3 short sentences — naming which precomputed fields you\'ll use and what you\'re weighing is enough, that is NOT the place to work through each candidate. NEVER re-list, re-type, or manually recount every item in a members/attacks array inside <thinking> to verify a precomputed field, and NEVER walk through candidates one-by-one there either (e.g. for "who should we kick") — reasoning over many members belongs in the visible answer as a short comparison of the few that actually matter, not as an exhaustive pass over everyone inside <thinking>. Going over the thinking budget risks the whole reply being cut off before the real answer is even written, which helps no one. NAMES AND TAGS: every player and the clan itself has a display name and a separate #-tag (e.g. "mazz" vs "#GUL0GUURC") in the data — the tag exists only so you can look someone up unambiguously in the JSON, never to show the person. Refer to players and the clan by their plain name only. Do not write out anyone\'s #tag, and do not append it in parentheses after a name, in any answer — even if the underlying data lists dozens of players with their tags right next to their names. The only exception is if the person explicitly asks for a tag (for example, asking for someones tag directly). CONCISENESS: when asked to identify one player or a small handful (e.g. "who has the lowest donations", "who should we kick"), name just that player (or the tied few, or the requested count) directly — do not list or rank the entire roster to get there. Save full member-by-member breakdowns for when the person actually asks to see everyone (e.g. "list everyone\'s donations" or "rank the whole clan"). TRUNCATION: recentWars, recentCapitalRaids, and recentAttacks are each capped to only the most recent entries, not the full archive. Right next to each one is a total-vs-included pair (totalWarsArchived/warsIncludedInContext, totalCapitalRaidsArchived/raidsIncludedInContext, totalAttacksArchived/attacksIncludedInContext). Before answering anything that could plausibly reach further back than what is included — a specific past month, "our first war", a raid weekend from a while ago, or similar — check whether the total is bigger than the included count for that array. If it is, say plainly that you only have the most recent N of M total and that the answer might fall outside that window, instead of answering as if the archive were complete. An item\'s absence from one of these arrays is never proof it did not happen — it may simply be older than what was included this time. RELEVANCE FILTERING: to keep prompts smaller, clanWarLeague, cwlHistory, recentWars, and recentCapitalRaids are each given to you at FULL per-item detail only for the categories (war/cwl/capital) that categoriesIncludedInFullDetail lists as relevant to this specific question — categories not in that list still appear, just as a lighter summary (record totals, most-recent-only, or similar) instead of a full breakdown, and are marked with a "summaryOnly" or "note" field saying so. recentAttacks is filtered the same way, and attacksOmittedByCategoryFilterCount tells you how many were left out. This is a simple keyword guess, not a certainty — if the person\'s question turns out to need detail from a category that only got a summary (for example the classifier missed a war-related word, or the question is genuinely about more than one area), say so plainly and answer from the summary\'s totals rather than inventing specifics that were not included, and suggest they ask about that category directly to get the full breakdown. TARGETED LOOKUP: when the question names a specific month, an opponent, or says something like "first war"/"earliest war"/"first raid"/"earliest raid", the app searches the COMPLETE archive for it (not just the windowed arrays above) and includes the result as targetedLookup, with a found: true/false flag. When targetedLookup is present and found is true, treat matchedWars/matchedCapitalRaids/matchedNotes/matchedAttacks inside it as the authoritative, complete answer for that specific reference — prefer it over recentWars/recentCapitalRaids, which may not include it at all. When targetedLookup is present and found is false, the full archive was actually checked and nothing matched — say so plainly and directly (e.g. "I don\'t see a war against that opponent in the archive"), rather than hedging about incomplete data or guessing from the windowed arrays; this is a real negative result, not a truncation gap. When targetedLookup is absent entirely, the question did not contain a reference specific enough to search for directly, so fall back to the TRUNCATION guidance above instead. TOOLS: when tools are available to you, you also have search_war_history, search_capital_raids, search_notes, and get_attack_details as callable functions that search the COMPLETE archive directly on demand. Call one whenever a question needs a specific war, raid weekend, note, or attack-by-attack detail that is not already covered by the context above or by targetedLookup — for example a date, opponent, or reference targetedLookup did not catch. Prefer calling a tool over saying you do not have the data, and prefer it over guessing. Do not call a tool for something already fully answerable from the context above; only reach for one when it would actually add information you do not already have.' },
       { role: 'system', content: `Current clan data (JSON):\n${context}` },
       ...chatHistory,
       { role: 'user', content: question }
     ];
     const provider = AI_PROVIDER_CONFIG[aiProvider] || AI_PROVIDER_CONFIG.sarvam;
-    const res = await fetch(`${LOCAL_PROXY}${provider.endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: provider.model,
-        temperature: 0.3,
-        max_tokens: 4096,
-        reasoning_effort: null,
-        messages
-      })
-    });
-    if(!res.ok){
-      const body = await res.text().catch(()=> '');
-      throw new Error(`${provider.label} API error ${res.status}: ${body.slice(0,300)}`);
+
+    // Phase 3 tool-call round-trip: when the provider supports it and the
+    // model asks to call search_war_history/search_capital_raids/search_notes/
+    // get_attack_details, run the tool(s) locally, append the results, and
+    // ask again — repeating until a final text answer comes back or a small
+    // safety cap is hit. For a provider with supportsTools:false, this loop
+    // body runs exactly once, identical to how this worked before Phase 3.
+    const MAX_TOOL_ROUNDS = 4;
+    let choice, msg;
+    for(let round = 0; round <= MAX_TOOL_ROUNDS; round++){
+      const res = await fetch(`${LOCAL_PROXY}${provider.endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign(
+          { model: provider.model, temperature: 0.3, max_tokens: 4096, reasoning_effort: null, messages },
+          provider.supportsTools ? { tools: TOOL_DEFINITIONS } : {}
+        ))
+      });
+      if(!res.ok){
+        const body = await res.text().catch(()=> '');
+        throw new Error(`${provider.label} API error ${res.status}: ${body.slice(0,300)}`);
+      }
+      const data = await res.json();
+      choice = data.choices?.[0];
+      msg = choice?.message;
+      const toolCalls = msg?.tool_calls;
+
+      if(provider.supportsTools && Array.isArray(toolCalls) && toolCalls.length && round < MAX_TOOL_ROUNDS){
+        thinkingMsg.textContent = 'Looking that up...';
+        messages.push({ role: 'assistant', content: msg.content || null, tool_calls: toolCalls });
+        for(const call of toolCalls){
+          const fnName = call.function?.name;
+          const handler = TOOL_HANDLERS[fnName];
+          let result;
+          try{
+            const args = JSON.parse(call.function?.arguments || '{}');
+            result = handler ? await handler(args) : { error: `Unknown tool: ${fnName}` };
+          }catch(e){
+            result = { error: `Tool call failed: ${e.message}` };
+          }
+          messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+        }
+        continue;
+      }
+      break;
     }
-    const data = await res.json();
-    const choice = data.choices?.[0];
-    const msg = choice?.message;
+
     const rawAnswer = (msg?.content && msg.content.trim()) || (msg?.reasoning_content && msg.reasoning_content.trim()) || '';
 
     // The model was told (system prompt above) to wrap any self-checking in
