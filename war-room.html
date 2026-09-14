@@ -775,7 +775,7 @@ applySectionOrder();
 let aiProvider = localStorage.getItem('warroom_ai_provider') || 'sarvam';
 const AI_PROVIDER_CONFIG = {
   sarvam: { endpoint: '/sarvam/chat', model: 'sarvam-105b', label: 'Sarvam' },
-  gemini: { endpoint: '/gemini/chat', model: 'gemini-2.0-flash', label: 'Gemini' },
+  gemini: { endpoint: '/gemini/chat', model: 'gemini-3.6-flash', label: 'Gemini' },
 };
 $('#aiProviderSelect').value = aiProvider;
 $('#aiProviderSelect').addEventListener('change', (e) => {
