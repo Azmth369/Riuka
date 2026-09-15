@@ -3017,6 +3017,53 @@ async function sendChat(){
     ];
     const provider = AI_PROVIDER_CONFIG[aiProvider] || AI_PROVIDER_CONFIG.sarvam;
 
+    // 429/500/502/503/504 are all "temporary, try again" signals — a busy
+    // model, a rate limit, or (per the actual Gemini 503 body seen in
+    // testing) explicit "high demand, try again later" text. Retrying a
+    // couple of times with a short backoff clears most of these without
+    // the person needing to manually resend the question.
+    const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+    const RETRY_DELAYS_MS = [1200, 2500];
+
+    // The raw error body is often double-wrapped JSON (this server's own
+    // {error: "..."} shape, where that string is itself "Gemini API 503:
+    // <Gemini's own JSON error>") — rather than parse that nested shape
+    // exactly (fragile if a provider's error format shifts slightly), pull
+    // the human-readable message out with a regex that works regardless of
+    // how deep it's nested, and fall back to a plain status-based message
+    // if nothing recognizable is found.
+    function friendlyApiErrorMessage(providerLabel, status, bodyText){
+      // The body is often double-encoded (an outer JSON string containing an
+      // inner error blob as escaped text), so literal "message" won't match
+      // directly — it shows up as \"message\". Un-escape first so the same
+      // regex catches both a plain and a nested/escaped error body.
+      const normalized = bodyText.replace(/\\"/g, '"');
+      const msgMatch = normalized.match(/"message"\s*:\s*"([^"]+)"/);
+      const statusMatch = normalized.match(/"status"\s*:\s*"([^"]+)"/);
+      if(msgMatch){
+        const detail = msgMatch[1].replace(/\\n/g, ' ').trim();
+        return `${providerLabel} is temporarily unavailable${statusMatch ? ` (${statusMatch[1]})` : ''} — ${detail} Try again in a moment, or switch providers using the dropdown above.`;
+      }
+      if(RETRYABLE_STATUSES.has(status)){
+        return `${providerLabel} is temporarily unavailable (error ${status}) — this is usually a short-lived spike in demand. Try again in a moment, or switch providers using the dropdown above.`;
+      }
+      return `${providerLabel} API error ${status}: ${bodyText.slice(0, 300)}`;
+    }
+
+    async function fetchProviderWithRetry(url, options, providerLabel){
+      let lastStatus, lastBody;
+      for(let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++){
+        const res = await fetch(url, options);
+        if(res.ok) return res;
+        lastStatus = res.status;
+        lastBody = await res.text().catch(() => '');
+        if(!RETRYABLE_STATUSES.has(res.status) || attempt === RETRY_DELAYS_MS.length) break;
+        thinkingMsg.textContent = `${providerLabel} is busy — retrying (${attempt + 1}/${RETRY_DELAYS_MS.length})...`;
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+      }
+      throw new Error(friendlyApiErrorMessage(providerLabel, lastStatus, lastBody));
+    }
+
     // Phase 3 tool-call round-trip: when the provider supports it and the
     // model asks to call search_war_history/search_capital_raids/search_notes/
     // get_attack_details, run the tool(s) locally, append the results, and
@@ -3026,18 +3073,14 @@ async function sendChat(){
     const MAX_TOOL_ROUNDS = 4;
     let choice, msg;
     for(let round = 0; round <= MAX_TOOL_ROUNDS; round++){
-      const res = await fetch(`${LOCAL_PROXY}${provider.endpoint}`, {
+      const res = await fetchProviderWithRetry(`${LOCAL_PROXY}${provider.endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(Object.assign(
           { model: provider.model, temperature: 0.3, max_tokens: 4096, reasoning_effort: null, messages },
           provider.supportsTools ? { tools: TOOL_DEFINITIONS } : {}
         ))
-      });
-      if(!res.ok){
-        const body = await res.text().catch(()=> '');
-        throw new Error(`${provider.label} API error ${res.status}: ${body.slice(0,300)}`);
-      }
+      }, provider.label);
       const data = await res.json();
       choice = data.choices?.[0];
       msg = choice?.message;
