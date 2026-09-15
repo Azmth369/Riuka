@@ -383,8 +383,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   // --- Attack log (individual attacks during war/CWL/capital raids), backed by Supabase ---
-  // GET  /attack-log?clanTag=%23ABC123&context=war&contextRef=...   -> [{...}, ...]
-  //   (context and contextRef are both optional filters)
+  // GET  /attack-log?clanTag=%23ABC123&context=war&contextRef=...              -> [{...}, ...]
+  //   (context, contextRef, attackerContains, defenderContains, limit are all optional filters —
+  //   attackerContains/defenderContains search the COMPLETE archive, not just a capped window;
+  //   see lib/attackLog.js)
   // POST /attack-log { clanTag, attacks: [...] }  -> upserts many at once, silently
   //   skipping any that were already saved (see lib/attackLog.js for the dedupe key)
   if (req.url.startsWith("/attack-log")) {
@@ -394,8 +396,12 @@ const server = http.createServer(async (req, res) => {
         const clanTag = url.searchParams.get("clanTag");
         const context = url.searchParams.get("context") || undefined;
         const contextRef = url.searchParams.get("contextRef") || undefined;
+        const attackerContains = url.searchParams.get("attackerContains") || undefined;
+        const defenderContains = url.searchParams.get("defenderContains") || undefined;
+        const limitRaw = url.searchParams.get("limit");
+        const limit = limitRaw ? parseInt(limitRaw, 10) : undefined;
         if (!clanTag) { sendJson(res, 400, { error: "clanTag query param required" }); return; }
-        const log = await getAttackLog(clanTag, context, contextRef);
+        const log = await getAttackLog(clanTag, { context, contextRef, attackerContains, defenderContains, limit });
         sendJson(res, 200, { log });
         return;
       }
