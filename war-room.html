@@ -147,6 +147,8 @@
   .save-error{ color: var(--red); font-size: 11.5px; margin-top: 8px; }
 
   .note-add-row{ display:flex; gap: 8px; margin-bottom: 14px; align-items:flex-start; }
+  .notebook-picker-row{ display:flex; gap:8px; align-items:center; margin-bottom:12px; }
+  .notebook-picker-row select{ flex:1; background: var(--bg-raised); border: 1px solid var(--panel-border); border-radius: 8px; color: var(--text); padding: 7px 10px; font-size: 12.5px; font-family:'Inter',sans-serif; }
   .note-add-row textarea{ flex:1; height: 44px; resize: vertical; }
   .note-list{ display:flex; flex-direction:column; gap: 10px; max-height: 320px; overflow-y:auto; }
   .note-item{ background: var(--bg-raised); border: 1px solid var(--panel-border); border-radius: 8px; padding: 10px 12px; }
@@ -447,7 +449,7 @@
 
 <script>
 const LOCAL_PROXY = ''; // same-origin: works locally (this server serves the page too) and once hosted on Render
-const state = { clanTag:null, clan:null, war:null, warlog:null, capital:null, cwl:null, cwlHistory:[], warHistory:[], capitalHistory:[], notes:[], thLevels:{}, currentConversationId:null, conversations:[], attackLog:[] };
+const state = { clanTag:null, clan:null, war:null, warlog:null, capital:null, cwl:null, cwlHistory:[], warHistory:[], capitalHistory:[], notes:[], allNotes:[], notebook:'General', notebooks:['General'], thLevels:{}, currentConversationId:null, conversations:[], attackLog:[] };
 let chatHistory = []; // running list of {role, content} for actual conversation memory
 let memberSort = { key: 'rank', dir: 'asc' };
 let thLoading = false;
@@ -1410,11 +1412,43 @@ function mergedCapitalList(){
   return Array.from(map.values()).sort((a, b) => (toEpochMs(b.startTime) || 0) - (toEpochMs(a.startTime) || 0));
 }
 
-// --- Notebook, backed by Supabase, scoped per clan tag ---
+// --- Notebook, backed by Supabase, scoped per clan tag AND per notebook ---
+// (a note belongs to exactly one notebook, like a folder — 'General' by
+// default; see notes-migration.sql for the schema change this needs).
 let notesError = '';
-async function loadNotes(){
+
+async function loadNotebooks(){
+  try{
+    const res = await fetch(`${LOCAL_PROXY}/notebooks?clanTag=${encodeURIComponent(state.clanTag)}`);
+    if(!res.ok){ state.notebooks = ['General']; return; }
+    const body = await res.json();
+    state.notebooks = (body.notebooks && body.notebooks.length) ? body.notebooks : ['General'];
+    if(!state.notebooks.includes(state.notebook)) state.notebook = state.notebooks[0];
+  }catch(e){
+    console.warn('[notebooks] load error:', e.message);
+    state.notebooks = ['General'];
+  }
+}
+
+// Every note across every notebook — kept separately from state.notes (which
+// is scoped to whichever notebook the panel is currently showing) so the AI
+// chat's context always sees the whole notebook archive, not just whatever
+// happens to be open in the UI right now.
+async function loadAllNotes(){
   try{
     const res = await fetch(`${LOCAL_PROXY}/notes?clanTag=${encodeURIComponent(state.clanTag)}`);
+    if(!res.ok){ state.allNotes = []; return; }
+    const body = await res.json();
+    state.allNotes = body.notes || [];
+  }catch(e){
+    console.warn('[notes] load-all error:', e.message);
+    state.allNotes = [];
+  }
+}
+
+async function loadNotes(){
+  try{
+    const res = await fetch(`${LOCAL_PROXY}/notes?clanTag=${encodeURIComponent(state.clanTag)}&notebook=${encodeURIComponent(state.notebook)}`);
     if(!res.ok){
       const body = await res.text().catch(()=>'');
       console.warn('[notes] load failed:', res.status, body);
@@ -1432,17 +1466,35 @@ async function loadNotes(){
   }
 }
 
+async function switchNotebook(name){
+  if(!name || name === state.notebook) return;
+  state.notebook = name;
+  await loadNotes();
+  renderNotes();
+}
+
+async function createNotebook(name){
+  const trimmed = (name || '').trim();
+  if(!trimmed) return;
+  // The notebook itself isn't a row anywhere — it only really exists once a
+  // note is saved to it — so just switch to it now (adding it to the local
+  // list so the picker shows it right away) and let addNote() create the
+  // first real row when the person actually writes something.
+  if(!state.notebooks.includes(trimmed)) state.notebooks = [...state.notebooks, trimmed].sort((a,b) => a.localeCompare(b));
+  await switchNotebook(trimmed);
+}
+
 async function addNote(content){
   if(!content || !content.trim()) return;
   try{
     const res = await fetch(`${LOCAL_PROXY}/notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clanTag: state.clanTag, content: content.trim() })
+      body: JSON.stringify({ clanTag: state.clanTag, content: content.trim(), notebook: state.notebook })
     });
     if(res.ok){
       notesError = '';
-      await loadNotes();
+      await Promise.all([loadNotes(), loadAllNotes(), loadNotebooks()]);
       renderNotes();
     } else {
       const body = await res.text().catch(()=>'');
@@ -1462,6 +1514,7 @@ async function deleteNoteById(id){
     const res = await fetch(`${LOCAL_PROXY}/notes?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
     if(!res.ok){ console.warn('[notes] delete failed:', res.status, await res.text().catch(()=>'')); return; }
     state.notes = state.notes.filter(n => n.id !== id);
+    state.allNotes = state.allNotes.filter(n => n.id !== id);
     renderNotes();
   }catch(e){ console.warn('[notes] delete error:', e.message); }
 }
@@ -1479,17 +1532,27 @@ function renderNotes(){
       </div>
     </div>`;
   }).join('');
+  const notebookOptions = state.notebooks.map(nb => `<option value="${esc(nb)}" ${nb === state.notebook ? 'selected' : ''}>${esc(nb)}</option>`).join('');
   const body = `
+    <div class="notebook-picker-row">
+      <select id="notebookSelect" title="Switch notebook">${notebookOptions}</select>
+      <button class="btn-ghost btn-small" id="newNotebookBtn" title="Create a new notebook">+ New notebook</button>
+    </div>
     <div class="note-add-row">
       <textarea id="noteInput" placeholder="Jot something down — a decision, a reminder, a lineup idea..."></textarea>
       <button class="btn btn-small" id="addNoteBtn">Add</button>
     </div>
     ${notesError ? `<div class="save-error">${esc(notesError)}</div>` : ''}
     <div class="note-list">
-      ${rows || `<div class="empty">No notes yet.</div>`}
+      ${rows || `<div class="empty">No notes yet in "${esc(state.notebook)}".</div>`}
     </div>
   `;
-  p.innerHTML = renderCollapsiblePanel('notesPanel', `Notebook${state.notes.length ? ` (${state.notes.length})` : ''}`, body);
+  p.innerHTML = renderCollapsiblePanel('notesPanel', `Notebook: ${esc(state.notebook)}${state.notes.length ? ` (${state.notes.length})` : ''}`, body);
+  $('#notebookSelect').addEventListener('change', (e) => switchNotebook(e.target.value));
+  $('#newNotebookBtn').addEventListener('click', () => {
+    const name = prompt('Name for the new notebook:');
+    if(name) createNotebook(name);
+  });
   $('#addNoteBtn').addEventListener('click', () => {
     const input = $('#noteInput');
     addNote(input.value);
@@ -1511,7 +1574,9 @@ async function loadAll(isRefresh, opts){
     await loadCwlHistory();
     await loadWarHistory();
     await loadCapitalHistory();
+    await loadNotebooks();
     await loadNotes();
+    await loadAllNotes();
     state.clan = await cocFetch(`/clans/${tagPath}`);
 
     if(!silent) setStatus('Loading current war...', 'loading');
@@ -2127,7 +2192,17 @@ async function findTargetedLookup(question){
 
   const allWarsFull = mergedWarList();
   const allRaidsFull = mergedCapitalList();
-  const allNotesFull = state.notes || [];
+  // Full cross-notebook archive, not just whichever notebook the panel
+  // currently has open — a note only needs fetching fresh here for the
+  // 'month' reference type below, so skip the round-trip otherwise.
+  const allNotesFull = ref.type === 'month' ? await (async () => {
+    try{
+      const res = await fetch(`${LOCAL_PROXY}/notes?clanTag=${encodeURIComponent(state.clanTag)}`);
+      if(!res.ok) return state.allNotes || [];
+      const body = await res.json();
+      return body.notes || [];
+    }catch(e){ return state.allNotes || []; }
+  })() : [];
 
   let matchedWars = [], matchedRaids = [], matchedNotes = [], detectedReference = '';
 
@@ -2173,7 +2248,7 @@ async function findTargetedLookup(question){
   return {
     detectedReference, found,
     matchedWars, matchedCapitalRaids: matchedRaids,
-    matchedNotes: matchedNotes.map(n => ({ content: n.content, createdAt: n.created_at })),
+    matchedNotes: matchedNotes.map(n => ({ content: n.content, notebook: n.notebook, createdAt: n.created_at })),
     matchedAttacks
   };
 }
@@ -2232,11 +2307,11 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'search_notes',
-      description: "Search every note ever saved in this clan's notebook by keyword and/or month/year. Notes are already fully included in context today, so this mainly helps pin down a keyword-specific match once the notebook gets large.",
+      description: "Search every note across every notebook this clan has, using real full-text search on keyword and/or filtered by month/year. Notes are already fully included in context today (across all notebooks), so this mainly helps pin down a specific match once notes get numerous — full-text search here understands word forms and relevance, not just exact substrings.",
       parameters: {
         type: 'object',
         properties: {
-          keyword: { type: 'string', description: 'Case-insensitive substring to search for inside note text. Omit to not filter by keyword.' },
+          keyword: { type: 'string', description: 'Search terms to look for inside note text (real full-text search, not a plain substring match). Omit to not filter by keyword.' },
           year: { type: 'integer', description: 'Four-digit year the note was created in. Omit to search all years.' },
           month: { type: 'integer', description: 'Month number 1-12 the note was created in. Omit to search all months.' }
         }
@@ -2290,13 +2365,19 @@ const TOOL_HANDLERS = {
     };
   },
   async search_notes({ keyword, year, month } = {}){
-    const needle = (keyword || '').toLowerCase();
-    const matches = (state.notes || []).filter(n => {
-      if(needle && !(n.content || '').toLowerCase().includes(needle)) return false;
-      if((year || month) && !monthYearMatch(n.created_at, year, month)) return false;
-      return true;
-    });
-    return { totalMatched: matches.length, notes: matches.map(n => ({ content: n.content, createdAt: n.created_at })) };
+    // Always hits the server, across ALL notebooks — never just whichever
+    // notebook the panel happens to have open — using real Postgres
+    // full-text search when a keyword is given (see lib/notes.js).
+    let matches = [];
+    try{
+      const url = (keyword && keyword.trim())
+        ? `${LOCAL_PROXY}/notes?clanTag=${encodeURIComponent(state.clanTag)}&q=${encodeURIComponent(keyword.trim())}`
+        : `${LOCAL_PROXY}/notes?clanTag=${encodeURIComponent(state.clanTag)}`;
+      const res = await fetch(url);
+      if(res.ok){ const body = await res.json(); matches = body.notes || []; }
+    }catch(e){ /* leave matches empty on a network failure */ }
+    if(year || month) matches = matches.filter(n => monthYearMatch(n.created_at, year, month));
+    return { totalMatched: matches.length, notes: matches.map(n => ({ content: n.content, notebook: n.notebook, createdAt: n.created_at })) };
   },
   async get_attack_details({ context, contextRef } = {}){
     if(!context || !contextRef) return { error: 'context and contextRef are both required.' };
@@ -2553,7 +2634,10 @@ async function buildContext(question){
     // see findTargetedLookup above. When present, it was searched against
     // the COMPLETE archive, not just the windowed arrays above.
     targetedLookup,
-    notes: (state.notes || []).map(n => ({ content: n.content, createdAt: n.created_at }))
+    // state.allNotes is every note across every notebook — not just the one
+    // currently open in the panel — so the chat always sees the full
+    // notebook archive regardless of what the person happens to be viewing.
+    notes: (state.allNotes || []).map(n => ({ content: n.content, notebook: n.notebook, createdAt: n.created_at }))
   };
   return JSON.stringify(ctx);
 }
