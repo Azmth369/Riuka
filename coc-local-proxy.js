@@ -20,7 +20,7 @@ const path = require("path");
 const { getCwlHistory, saveCwlSeason } = require("./lib/cwlHistory");
 const { getWarHistory, saveWar } = require("./lib/warHistory");
 const { getCapitalHistory, saveCapitalSeason } = require("./lib/capitalHistory");
-const { getNotes, addNote, deleteNote } = require("./lib/notes");
+const { getNotes, addNote, deleteNote, searchNotes, listNotebooks } = require("./lib/notes");
 const { listConversations, createConversation, deleteConversation, getMessages, addMessage } = require("./lib/chatHistory");
 const { getAttackLog, saveAttacks } = require("./lib/attackLog");
 const { callGemini } = require("./lib/geminiProxy");
@@ -253,16 +253,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   // --- Notebook, backed by Supabase ---
-  // GET    /notes?clanTag=%23ABC123          -> [{ id, content, created_at }, ...]
-  // POST   /notes { clanTag, content }        -> adds one note
-  // DELETE /notes?id=123                      -> removes one note
-  if (req.url.startsWith("/notes")) {
+  // GET    /notes?clanTag=%23ABC123[&notebook=General][&q=keyword]
+  //          -> [{ id, content, created_at, notebook }, ...]
+  //          notebook filters to one notebook; q runs a real Postgres
+  //          full-text search instead of a plain listing (see lib/notes.js
+  //          and notes-migration.sql for the search index this needs).
+  // POST   /notes { clanTag, content, notebook? }  -> adds one note (defaults to 'General')
+  // DELETE /notes?id=123                           -> removes one note
+  if (req.url.startsWith("/notes") && !req.url.startsWith("/notebooks")) {
     try {
       const url = new URL(req.url, `http://${req.headers.host}`);
       if (req.method === "GET") {
         const clanTag = url.searchParams.get("clanTag");
         if (!clanTag) { sendJson(res, 400, { error: "clanTag query param required" }); return; }
-        const notes = await getNotes(clanTag);
+        const notebook = url.searchParams.get("notebook") || undefined;
+        const q = url.searchParams.get("q");
+        const notes = q ? await searchNotes(clanTag, q, notebook) : await getNotes(clanTag, notebook);
         sendJson(res, 200, { notes });
         return;
       }
@@ -271,9 +277,9 @@ const server = http.createServer(async (req, res) => {
         let body;
         try { body = JSON.parse(raw.toString("utf8") || "{}"); }
         catch (e) { sendJson(res, 400, { error: "Invalid JSON body" }); return; }
-        const { clanTag, content } = body;
+        const { clanTag, content, notebook } = body;
         if (!clanTag || !content || !content.trim()) { sendJson(res, 400, { error: "clanTag and non-empty content are required" }); return; }
-        const saved = await addNote(clanTag, content.trim());
+        const saved = await addNote(clanTag, content.trim(), notebook);
         sendJson(res, 200, { saved: true, data: saved });
         return;
       }
@@ -285,6 +291,22 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       sendJson(res, 405, { error: "Method not allowed" });
+    } catch (err) {
+      sendJson(res, 500, { error: err.message });
+    }
+    return;
+  }
+
+  // GET /notebooks?clanTag=%23ABC123 -> ["General", "War Planning", ...]
+  // Distinct notebook names in use for this clan, for populating a picker —
+  // 'General' is always included even before any note exists.
+  if (req.url.startsWith("/notebooks")) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const clanTag = url.searchParams.get("clanTag");
+      if (!clanTag) { sendJson(res, 400, { error: "clanTag query param required" }); return; }
+      const notebooks = await listNotebooks(clanTag);
+      sendJson(res, 200, { notebooks });
     } catch (err) {
       sendJson(res, 500, { error: err.message });
     }
