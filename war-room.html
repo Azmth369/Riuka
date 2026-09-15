@@ -1862,16 +1862,19 @@ function renderAttackLog(){
   // opponent, with no other column saying which — underline ours so it's
   // obvious at a glance which side someone is on.
   const ownTags = new Set((state.clan?.memberList || []).map(m => m.tag));
-  const nameCell = (name, tag) => {
+  // The own-member-vs-opponent ambiguity only exists for war/CWL rows —
+  // capital raid attacks are always our own member attacking an enemy
+  // capital district, so underlining there wouldn't distinguish anything.
+  const nameCell = (name, tag, context) => {
     const label = esc(name || tag || 'Unknown');
-    return ownTags.has(tag) ? `<span class="own-member">${label}</span>` : label;
+    return (context !== 'capital' && ownTags.has(tag)) ? `<span class="own-member">${label}</span>` : label;
   };
   const allRows = log.map(a => {
     const starClass = a.stars >= 3 ? 'result-win' : (a.stars <= 0 ? 'result-lose' : 'result-tie');
     return `<tr>
       <td><span class="role-badge">${esc(ATTACK_CONTEXT_LABEL[a.context] || a.context)}</span></td>
-      <td class="name">${nameCell(a.attacker_name, a.attacker_tag)}</td>
-      <td>${nameCell(a.defender_name, a.defender_tag)}</td>
+      <td class="name">${nameCell(a.attacker_name, a.attacker_tag, a.context)}</td>
+      <td>${nameCell(a.defender_name, a.defender_tag, a.context)}</td>
       <td class="${starClass}">${a.stars != null ? esc(a.stars) + '★' : '—'}</td>
       <td>${a.destruction_percent != null ? Number(a.destruction_percent).toFixed(1) + '%' : '—'}</td>
       <td>${esc(formatDMY(a.recorded_at))}</td>
@@ -1879,7 +1882,7 @@ function renderAttackLog(){
   });
   const { rowsHtml, moreHtml } = limitRows('attackLogPanel', allRows, 10);
   const body = `
-    <div class="empty" style="padding-top:0;margin-bottom:8px;">${log.length} attacks recorded across war, CWL, and capital raids. <span class="own-member">Underlined</span> names are our own members.</div>
+    <div class="empty" style="padding-top:0;margin-bottom:8px;">${log.length} attacks recorded across war, CWL, and capital raids. In war/CWL rows, <span class="own-member">underlined</span> names are our own members.</div>
     <table>
       <thead><tr><th>Event</th><th>Attacker</th><th>Target</th><th>Stars</th><th>Destruction</th><th>Recorded</th></tr></thead>
       <tbody>${rowsHtml}</tbody>
