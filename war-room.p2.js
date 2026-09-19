@@ -35,7 +35,7 @@ async function loadCwlLeague(tagPath){
       warTag: ourWarTag,
       state: ourWar.state,
       teamSize: ourWar.teamSize,
-      us: { name: us.name, stars: us.stars ?? 0, destruction: us.destructionPercentage ?> 0, attacks: us.attacks ?? 0 },
+      us: { name: us.name, stars: us.stars ?? 0, destruction: us.destructionPercentage ?? 0, attacks: us.attacks ?? 0 },
       opponent: { name: them.name, stars: them.stars ?? 0, destruction: them.destructionPercentage ?? 0 },
       ourMembers: (us.members || []).map(m => ({
         name: m.name,
@@ -142,10 +142,10 @@ function extractWarAttacks(w, context, contextRef, warTag){
     (m.attacks || []).forEach(a => {
       out.push({
         context, contextRef, warTag: warTag || null,
-          attackerTag: m.tag, attackerName: m.name,
-          defenderTag: a.defenderTag, defenderName: theirNames.get(a.defenderTag) || null,
-          stars: a.stars, destructionPercent: a.destructionPercentage, attackOrder: a.order
-        });
+        attackerTag: m.tag, attackerName: m.name,
+        defenderTag: a.defenderTag, defenderName: theirNames.get(a.defenderTag) || null,
+        stars: a.stars, destructionPercent: a.destructionPercentage, attackOrder: a.order
+      });
     });
   });
   (w.opponent.members || []).forEach(m => {
@@ -154,7 +154,7 @@ function extractWarAttacks(w, context, contextRef, warTag){
         context, contextRef, warTag: warTag || null,
         attackerTag: m.tag, attackerName: m.name,
         defenderTag: a.defenderTag, defenderName: ourNames.get(a.defenderTag) || null,
-        stars: a.stars, destructionPercentage: a.destructionPercentage, attackOrder: a.order
+        stars: a.stars, destructionPercent: a.destructionPercentage, attackOrder: a.order
       });
     });
   });
@@ -178,7 +178,7 @@ function extractCapitalAttacks(raidItem, contextRef){
           context: 'capital', contextRef,
           attackerTag: a.attacker?.tag, attackerName: a.attacker?.name,
           defenderTag: `${enemy.defender?.tag || 'enemy'}:${d.id}`,
-          defenderName: `${enemy.defender?.name || 'Enemy capital'}â€” ${d.name}`,
+          defenderName: `${enemy.defender?.name || 'Enemy capital'} â€” ${d.name}`,
           stars: a.stars, destructionPercent: a.destructionPercent, attackOrder: idx
         });
       });
@@ -241,12 +241,12 @@ async function loadAttackLog(){
 // server's /war-history route, same pattern as CWL history above. CoC's
 // own war log only keeps the last 10 wars, so this is what lets the
 // archive grow past that over time.
-async function loadWazHistory(){
+async function loadWarHistory(){
   try{
     const res = await fetch(`${LOCAL_PROXY}/war-history?clanTag=${encodeURIComponent(state.clanTag)}`);
-    if(!res.ok){ 
-      console.warn('[war-history] load failed:', res.status, await res.text().catch(()=>''')); 
-      state.warHistory = []; return; 
+    if(!res.ok){
+      console.warn('[war-history] load failed:', res.status, await res.text().catch(()=>'')); 
+      state.warHistory = []; return;
     }
     const body = await res.json();
     state.warHistory = body.history || [];
@@ -264,7 +264,7 @@ async function saveWarToHistory(war){
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clanTag: state.clanTag, ...war })
     });
-    if(!res.ok) console.warn('[war-history] save failed:', res.status, await res.text().catch(()=>'''));
+    if(!res.ok) console.warn('[war-history] save failed:', res.status, await res.text().catch(()=>''));
   }catch(e){ console.warn('[war-history] save error:', e.message); }
 }
 
@@ -273,11 +273,11 @@ function mergedWarList(){
   (state.warlog?.items || []).forEach(item => {
     if(!item.endTime || !isRegularWarEntry(item)) return;
     const key = toEpochMs(item.endTime);
-    if(key == null)) return;
+    if(key == null) return;
     map.set(key, {
       endTime: item.endTime, opponentName: item.opponent?.name || 'Unknown',
       teamSize: item.teamSize, result: item.result,
-        ourStars: item.clan.stars, theirStars: item.opponent.stars
+      ourStars: item.clan.stars, theirStars: item.opponent.stars
     });
   });
   if(state.war && state.war.state === 'warEnded' && state.war.endTime && isRegularWarEntry(state.war)){
@@ -289,7 +289,63 @@ function mergedWarList(){
     });
   }
   (state.warHistory || []).forEach(h => {
-    // Defensive: also drop any alreadxµ…É¡¥Ù•É½ÝÌÍ…Ù•‰•™½É”Ñ¡¥Ì™¥±Ñ•È•á¥ÍÑ•¸(€€€¥˜ … ¹•¹‘}Ñ¥µ”ñð€… ¹½ÁÁ½¹•¹Ñ}¹…µ”¤É•ÑÕÉ¸ì(€€€½¹ÍÐ­•ä€ôÑ½Á½¡5Ì¡ ¹•¹‘}Ñ¥µ”¤ì(€€€¥˜¡­•ä€ôô¹Õ±°ñðµ…À¹¡…Ì¡­•ä¤¤¤É•ÑÕÉ¸ì(€€€µ…À¹Í•Ð¡­•ä°ì(€€€€€•¹‘Q¥µ”è ¹•¹‘}Ñ¥µ”°½ÁÁ½¹•¹Ñ9…µ”è ¹½ÁÁ½¹•¹Ñ}¹…µ”ñð€U¹­¹½Ý¸œ°(€€€€€Ñ•…µM¥é”è ¹Ñ•…µ}Í¥é”°É•ÍÕ±Ðè ¹É•ÍÕ±Ð°(€€€€€½ÕÉMÑ…ÉÌè ¹½ÕÉ}ÍÑ…ÉÌ°Ñ¡•¥ÉMÑ…ÉÌè ¹Ñ¡•¥É}ÍÑ…ÉÌ(€€€ô¤ì(€ô¤ì(€É•ÑÕÉ¸ÉÉ…ä¹™É½´¡µ…À¹Ù…±Õ•Ì ¤¤¹Í½ÉÐ ¡„°ˆ¤€ôø€¡Ñ½Á½¡5Ì¡ˆ¹•¹‘Q¥µ”¤ñð€À¤€´€¡Ñ½Á½¡5Ì¡„¹•¹‘Q¥µ”¤ñð€À¤¤ì)ô((¼¼…Á¥Ñ…°É…¥¡¥ÍÑ½ÉäƒŠPÍ…µ”¥‘•„¸½ÌA$½¹±ä­••ÁÌÑ¡”±…ÍÐ™•Ü(¼¼Ý••­•¹‘Ì°Í¼…¹åÑ¡¥¹œ½±‘•È½¹±ä•á¥ÍÑÌ‰•…ÕÍ”Ý”Í…Ù•¥Ð¡•É”¸)™Õ¹Ñ¥½¸±½…‘…Á¥Ñ…±!¥ÍÑ½Éä ¥ì(€ÑÉåì(€€€½¹ÍÐÉ•Ì€ô…Ý…¥Ð™•Ñ ¡€‘í1=1}AI=aeô½…Á¥Ñ…°µ¡¥ÍÑ½Éäý±…¹Q…œô‘í•¹½‘•UI%½µÁ½¹•¹Ð¡ÍÑ…Ñ”¹±…¹Q…œ¥õ€¤ì(€€€¥˜ …É•Ì¹½¬¥ì(€€€€€½¹Í½±”¹Ý…É¸ m…Á¥Ñ…°µ¡¥ÍÑ½Éåt±½…™…¥±•èœ°É•Ì¹ÍÑ…ÑÕÌ°…Ý…¥ÐÉ•Ì¹Ñ•áÐ ¤¹…Ñ   ¤ôøœœœ¤¤ì(€€€€€ÍÑ…Ñ”¹…Á¥Ñ…±!¥ÍÑ½Éä€ômtìÉ•ÑÕÉ¸ì€(€€€ô(€€€½¹ÍÐ‰½‘ä€ô…Ý…¥ÐÉ•Ì¹©Í½¸ ¤ì(€€€ÍÑ…Ñ”¹…Á¥Ñ…±!¥ÍÑ½Éä€ô‰½‘ä¹¡¥ÍÑ½Éäñðmtì(€õ…Ñ ¡”¥ì(€€€½¹Í½±”¹Ý…É¸ m…Á¥Ñ…°µ¡¥ÍÑ½Éåt±½…•ÉÉ½Èèœ°”¹µ•ÍÍ…”¤ì(€€€ÍÑ…Ñ”¹…Á¥Ñ…±!¥ÍÑ½Éä€ômtì(€ô)ô()…Íå¹Œ™Õ¹Ñ¥½¸Í…Ù•…Á¥Ñ…±Q½!¥ÍÑ½Éä¡Í•…Í½¸¥ì(€¥˜ …Í•…Í½¸ñð€…Í•…Í½¸¹ÍÑ…ÉÑQ¥µ”¤É•ÑÕÉ¸ì(€ÑÉåì(€€€½¹ÍÐÉ•Ì€ô…Ý…¥Ð™•Ñ ¡€‘í1=1}AI=aeô½…Á¥Ñ…°µ¡¥ÍÑ½Éå€°ì(€€€€€µ•Ñ¡½è€A=MPœ°(€€€€€¡•…‘•ÉÌèì€½¹Ñ•¹ÐµQåÁ”œè€…ÁÁ±¥…Ñ¥½¸½©Í½¸œô°(€€€€€‰½‘äè)M=8¹ÍÑÉ¥¹¥™ä¡ì±…¹Q…œèÍÑ…Ñ”¹±…¹Q…œ°€¸¸¹Í•…Í½¸ô¤(€€€ô¤ì(€€€¥˜ …É•Ì¹½¬¤½¹Í½±”¹Ý…É¸ m…Á¥Ñ…°µ¡¥ÍÑ½ÉåtÍ…Ù”™…¥±•èœ°É•Ì¹ÍÑ…ÑÕÌ°…Ý…¥ÐÉ•Ì¹Ñ•áÐ ¤¹…Ñ   ¤ôøœœœ¤¤ì(€õ…Ñ ¡”¥ì½¹Í½±”¹Ý…É¸ m…Á¥Ñ…°µ¡¥ÍÑ½ÉåtÍ…Ù”•ÉÉ½Èèœ°”¹µ•ÍÍ…”¤ìô)ô()™Õ¹Ñ¥½¸µ•É•‘…Á¥Ñ…±1¥ÍÐ ¥ì(€½¹ÍÐµ…À€ô¹•Ü5…À ¤ì(€€¡ÍÑ…Ñ”¹…Á¥Ñ…°ü¹¥Ñ•µÌñðmt¤¹™½É… ¡Ì€ôøì(€€€¥˜ …Ì¹ÍÑ…ÉÑQ¥µ”¤É•ÑÕÉ¸ì(€€€½¹ÍÐ­•ä€ôÑ½Á½¡5Ì¡Ì¹ÍÑ…ÉÑQ¥µ”¤ì(€€€¥˜¡­•ä€ôô¹Õ±°¤¤É•ÑÕÉ¸ì(€€€µ…À¹Í•Ð¡­•ä°ì(€€€€€ÍÑ…ÉÑQ¥µ”èÌ¹ÍÑ…ÉÑQ¥µ”°Ñ½Ñ…±1½½ÐèÌ¹…Á¥Ñ…±Q½Ñ…±1½½Ð°(€€€€€É…¥‘Í½µÁ±•Ñ•èÌ¹É…¥‘Í½µÁ±•Ñ•°Ñ½Ñ…±ÑÑ…­ÌèÌ¹Ñ½Ñ…±ÑÑ…­Ì°(€€€€€µ•µ‰•ÉÌèµ…Á…Á¥Ñ…±5•µ‰•ÉÌ¡Ì¹µ•µ‰•ÉÌ¤(€€€ô¤ì(€ô¤ì(€€¡ÍÑ…Ñ”¹…Á¥Ñ…±!¥ÍÑ½Éäñðmt¤¹™½É… ¡ €ôøì(€€€¥˜ … ¹ÍÑ…ÉÑ}Ñ¥µ”¤É•ÑÕÉ¸ì(€€€½¹ÍÐ­•ä€ôÑ½Á½¡5s(h.start_time);
+    // Defensive: also drop any already-archived rows saved before this filter existed.
+    if(!h.end_time || !h.opponent_name) return;
+    const key = toEpochMs(h.end_time);
+    if(key == null || map.has(key)) return;
+    map.set(key, {
+      endTime: h.end_time, opponentName: h.opponent_name || 'Unknown',
+      teamSize: h.team_size, result: h.result,
+      ourStars: h.our_stars, theirStars: h.their_stars
+    });
+  });
+  return Array.from(map.values()).sort((a, b) => (toEpochMs(b.endTime) || 0) - (toEpochMs(a.endTime) || 0));
+}
+
+// Capital raid history â€” same idea. CoC's API only keeps the last few
+// weekends, so anything older only exists because we saved it here.
+async function loadCapitalHistory(){
+  try{
+    const res = await fetch(`${LOCAL_PROXY}/capital-history?clanTag=${encodeURIComponent(state.clanTag)}`);
+    if(!res.ok){
+      console.warn('[capital-history] load failed:', res.status, await res.text().catch(()=>''));
+      state.capitalHistory = []; return;
+    }
+    const body = await res.json();
+    state.capitalHistory = body.history || [];
+  }catch(e){
+    console.warn('[capital-history] load error:', e.message);
+    state.capitalHistory = [];
+  }
+}
+
+async function saveCapitalToHistory(season){
+  if(!season || !season.startTime) return;
+  try{
+    const res = await fetch(`${LOCAL_PROXY}/capital-history`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clanTag: state.clanTag, ...season })
+    });
+    if(!res.ok) console.warn('[capital-history] save failed:', res.status, await res.text().catch(()=>''));
+  }catch(e){ console.warn('[capital-history] save error:', e.message); }
+}
+
+function mergedCapitalList(){
+  const map = new Map();
+  (state.capital?.items || []).forEach(s => {
+    if(!s.startTime) return;
+    const key = toEpochMs(s.startTime);
+    if(key == null) return;
+    map.set(key, {
+      startTime: s.startTime, totalLoot: s.capitalTotalLoot,
+      raidsCompleted: s.raidsCompleted, totalAttacks: s.totalAttacks,
+      members: mapCapitalMembers(s.members)
+    });
+  });
+  (state.capitalHistory || []).forEach(h => {
+    if(!h.start_time) return;
+    const key = toEpochMs(h.start_time);
     if(key == null || map.has(key)) return;
     map.set(key, {
       startTime: h.start_time, totalLoot: h.total_loot,
@@ -338,7 +394,7 @@ async function loadNotes(){
   try{
     const res = await fetch(`${LOCAL_PROXY}/notes?clanTag=${encodeURIComponent(state.clanTag)}&notebook=${encodeURIComponent(state.notebook)}`);
     if(!res.ok){
-      const body = await res.text().catch(()=>''');
+      const body = await res.text().catch(()=>'');
       console.warn('[notes] load failed:', res.status, body);
       notesError = `Couldn't load notes (server said ${res.status}). Check the server terminal for details.`;
       state.notes = [];
@@ -366,7 +422,7 @@ async function createNotebook(name){
   if(!trimmed) return;
   // The notebook itself isn't a row anywhere â€” it only really exists once a
   // note is saved to it â€” so just switch to it now (adding it to the local
-  // list so the picker shows it right away and let addNote() create the
+  // list so the picker shows it right away) and let addNote() create the
   // first real row when the person actually writes something.
   if(!state.notebooks.includes(trimmed)) state.notebooks = [...state.notebooks, trimmed].sort((a,b) => a.localeCompare(b));
   await switchNotebook(trimmed);
@@ -385,14 +441,14 @@ async function addNote(content){
       await Promise.all([loadNotes(), loadAllNotes(), loadNotebooks()]);
       renderNotes();
     } else {
-      const body = await res.text().catch(()=>''');
+      const body = await res.text().catch(()=>'');
       console.warn('[notes] save failed:', res.status, body);
       notesError = `Note wasn't saved â€” server said ${res.status}. Check the server terminal for details.`;
       renderNotes();
     }
   }catch(e){
     console.warn('[notes] save error:', e.message);
-    notesError = `NOte wasn't saved â€” couldn't reach the server: ${e.message}`;
+    notesError = `Note wasn't saved â€” couldn't reach the server: ${e.message}`;
     renderNotes();
   }
 }
@@ -400,7 +456,7 @@ async function addNote(content){
 async function deleteNoteById(id){
   try{
     const res = await fetch(`${LOCAL_PROXY}/notes?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if(!res.ok){ console.warn('[notes] delete failed:', res.status, await res.text().catch(()=>''')); return; }
+    if(!res.ok){ console.warn('[notes] delete failed:', res.status, await res.text().catch(()=>'')); return; }
     state.notes = state.notes.filter(n => n.id !== id);
     state.allNotes = state.allNotes.filter(n => n.id !== id);
     renderNotes();
@@ -478,7 +534,7 @@ async function loadAll(isRefresh, opts){
         teamSize: state.war.teamSize,
         result: computeWarResult(state.war.clan, state.war.opponent),
         ourStars: state.war.clan.stars,
-          theirStars: state.war.opponent.stars,
+        theirStars: state.war.opponent.stars,
         ourDestruction: state.war.clan.destructionPercentage,
         theirDestruction: state.war.opponent.destructionPercentage
       }); // fire-and-forget
@@ -554,10 +610,10 @@ async function loadAll(isRefresh, opts){
       updatePollIndicator();
     }
 
-    if(!silent) loadTownHallLevels(); // fire-and-forget: dashboard is already usable, THIS column backfills as this completes
+    if(!silent) loadTownHallLevels(); // fire-and-forget: dashboard is already usable, TH column backfills as this completes
   }catch(err){
     if(!silent) setStatus(err.message, 'error');
-    else console.warn('[pull] silent refresh failed:', err.message);
+    else console.warn('[poll] silent refresh failed:', err.message);
   }finally{
     if(!silent) btn.disabled = false;
   }
@@ -589,8 +645,8 @@ function renderHero(){
       <div class="stat"><div class="v">${esc(c.clanLevel)}</div><div class="l">Level</div></div>
       <div class="stat"><div class="v">${esc(c.members)}/50</div><div class="l">Members</div></div>
       <div class="stat"><div class="v">${esc(c.warWinStreak)}</div><div class="l">Win Streak</div></div>
-      <div class="stat"><div class="v">${esc(c.warWins ?? 'â€´})}</div><div class="l">War Wins</div></div>
-      <div class="stat"><div class="v">${esc(c.clanCapital?.capitalWarLevel ?? 'â€´')}</div><div class="l">Capital Hall</div></div>
+      <div class="stat"><div class="v">${esc(c.warWins ?? 'â€”')}</div><div class="l">War Wins</div></div>
+      <div class="stat"><div class="v">${esc(c.clanCapital?.capitalHallLevel ?? 'â€”')}</div><div class="l">Capital Hall</div></div>
     </div>
   `;
 }
