@@ -32,7 +32,7 @@ let memberSort = { key: 'rank', dir: 'asc' };
 let thLoading = false;
 
 const $ = sel => document.querySelector(sel);
-const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}[c]));
 
 // Expands CoC's compact "YYYYMMDDTHHMMSS.000Z" timestamp into a real ISO
 // string; passes anything else through unchanged (already-ISO Supabase
@@ -156,14 +156,14 @@ function setPanelCollapsed(id, collapsed){
   try{ localStorage.setItem('warroom_collapsed', JSON.stringify(collapsedPanels)); }catch(e){}
 }
 function togglePanelCollapse(id){
-  setPanelCollapsed(id, !isPanelCollapsee(id));
+  setPanelCollapsed(id, !isPanelCollapsed(id));
   renderAll();
 }
 // Builds a standard panel header with a Hide/Show toggle. Render functions
 // pass their body HTML and get back the full panel innerHTML, already
 // respecting the saved collapsed state.
 function renderCollapsiblePanel(id, titleHtml, bodyHtml, extraHeaderBtnsHtml){
-  const collapsed = isPanelCollapsee(id);
+  const collapsed = isPanelCollapsed(id);
   return `
     <div class="panel-header-row">
       <h3><span class="dot"></span>${titleHtml}</h3>
