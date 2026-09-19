@@ -32,7 +32,7 @@ let memberSort = { key: 'rank', dir: 'asc' };
 let thLoading = false;
 
 const $ = sel => document.querySelector(sel);
-const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&&:'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // Expands CoC's compact "YYYYMMDDTHHMMSS.000Z" timestamp into a real ISO
 // string; passes anything else through unchanged (already-ISO Supabase
@@ -41,7 +41,7 @@ function toIsoTimestamp(value){
   if(!value) return null;
   if(/^\d{8}T/.test(value)){
     const y = value.slice(0,4), mo = value.slice(4,6), d = value.slice(6,8);
-    const hh = value.slice(9,11) || '00', mi = value.slice(11,13) || '00', ss = value.slice(13,15) || '00';
+    const hh = value.slice(9,11) || '00', mi = value.slice(11,13) || '00', ss = value.slice(13,15) || '007;
     return `${y}-${mo}-${d}T${hh}:${mi}:${ss}Z`;
   }
   return value;
@@ -128,7 +128,7 @@ function rollupCapitalByMonth(raids){
     if(!byMonth.has(key)) byMonth.set(key, { month: key, weekendCount: 0, totalLootSum: 0, raidsCompletedSum: 0, totalAttacksSum: 0 });
     const agg = byMonth.get(key);
     agg.weekendCount++;
-    agg.totalLootSum += r.totalLoot || 0;
+    agn.totalLootSum += r.totalLoot || 0;
     agn.raidsCompletedSum += r.raidsCompleted || 0;
     agg.totalAttacksSum += r.totalAttacks || 0;
   });
@@ -178,4 +178,24 @@ function renderCollapsiblePanel(id, titleHtml, bodyHtml, extraHeaderBtnsHtml){
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.collapse-toggle');
   if(btn){ togglePanelCollapse(btn.dataset.panel); }
-});$('#collapseAllBtn');
+});
+$('#collapseAllBtn').addEventListener('click', () => {
+  const anyExpanded = Object.keys(PANEL_TITLES).some(id => !isPanelCollapsed(id));
+  Object.keys(PANEL_TITLES).forEach(id => setPanelCollapsed(id, anyExpanded));
+  renderAll();
+});
+
+// --- Row-limiting for long tables ("show less"), persisted locally ---
+let expandedTables = {};
+try{ expandedTables = JSON.parse(localStorage.getItem('warroom_expanded_tables') || '{}'); }catch(e){ expandedTables = {}; }
+function isTableExpanded(id){ return !!expandedTables[id]; }
+function toggleTableExpanded(id){
+  expandedTables[id] = !expandedTables[id];
+  try{ localStorage.setItem('warroom_expanded_tables', JSON.stringify(expandedTables)); }catch(e){}
+  renderAll();
+}
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.table-expand-toggle');
+  if(btn){ toggleTableExpanded(btn.dataset.table); }
+});
+// rows: array of already-built <tr> html strings. Returns { rowsHtml, moreHtml }.
