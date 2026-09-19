@@ -137,17 +137,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // The dashboard page itself is always served; the token gate applies to
-  // the API routes below (the page needs to load to ask for the token).
-  if (req.method === 'GET' && (req.url === '/' || req.url === '/war-room.html')) {
-    const filePath = path.join(__dirname, 'war-room.html');
-    fs.readFile(filePath, (err, data) => {
+  // The dashboard page and its script files are always served; the token gate
+  // applies to the API routes below (the page needs to load to ask for the
+  // token). Only these exact filenames are served from the app directory.
+  const STATIC_FILES = {
+    '/': { file: 'war-room.html', type: 'text/html; charset=utf-8' },
+    '/war-room.html': { file: 'war-room.html', type: 'text/html; charset=utf-8' },
+    '/war-room.p1.js': { file: 'war-room.p1.js', type: 'application/javascript; charset=utf-8' },
+    '/war-room.p2.js': { file: 'war-room.p2.js', type: 'application/javascript; charset=utf-8' },
+    '/war-room.p3.js': { file: 'war-room.p3.js', type: 'application/javascript; charset=utf-8' },
+  };
+  if (req.method === 'GET' && STATIC_FILES[req.url]) {
+    const { file, type } = STATIC_FILES[req.url];
+    fs.readFile(path.join(__dirname, file), (err, data) => {
       if (err) {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end("war-room.html not found - make sure it's in the same folder as this script.");
+        res.end(file + ' not found - make sure it is next to the server script.');
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.writeHead(200, { 'Content-Type': type });
       res.end(data);
     });
     return;
