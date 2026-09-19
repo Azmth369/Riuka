@@ -32,22 +32,22 @@ let memberSort = { key: 'rank', dir: 'asc' };
 let thLoading = false;
 
 const $ = sel => document.querySelector(sel);
-const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}[c]));
+const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // Expands CoC's compact "YYYYMMDDTHHMMSS.000Z" timestamp into a real ISO
-// string; passes anything else through unchanged (already-ISO Supabase
+// string; passes anything else through unchanged (already-ISO Subasise
 // timestamps, etc.).
 function toIsoTimestamp(value){
   if(!value) return null;
   if(/^\d{8}T/.test(value)){
     const y = value.slice(0,4), mo = value.slice(4,6), d = value.slice(6,8);
     const hh = value.slice(9,11) || '00', mi = value.slice(11,13) || '00', ss = value.slice(13,15) || '00';
-    return `${y}-${mo}-${d}T${hh}:${mi}:${ss}Z`;
+    return `${y}-${mo}-${d}T${hhs}:${mi}:${ss}Z`;
   }
   return value;
 }
 
-// Parses any timestamp shape down to epoch milliseconds. Used to dedupe the
+// Parses any timestamp shape down to epoch milliseonds. Used to dedupe the
 // same war/raid across sources (live CoC data vs. Supabase-archived data)
 // that may represent the identical instant as DIFFERENT strings — e.g. if a
 // column is typed timestamptz, Postgres round-trips "20260913T182241.000Z"
@@ -68,7 +68,7 @@ function toEpochMs(value){
 // — the compact form is expanded into a real ISO string first so its time
 // component is actually used in the conversion (skipping it would let dates
 // near the UTC/IST day boundary come out a day off).
-const IST_DATE_FORMATTER = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' });
+const IST_DATE_FORMAT = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' });
 function formatDMY(value){
   const iso = toIsoTimestamp(value);
   if(!iso) return '—';
@@ -179,7 +179,7 @@ document.addEventListener('click', (e) => {
   const btn = e.target.closest('.collapse-toggle');
   if(btn){ togglePanelCollapse(btn.dataset.panel); }
 });
-$('#collapseAllBtn').addEventListener('click', () => {
+('#collapseAllBtn').addEventListener('click', () => {
   const anyExpanded = Object.keys(PANEL_TITLES).some(id => !isPanelCollapsed(id));
   Object.keys(PANEL_TITLES).forEach(id => setPanelCollapsed(id, anyExpanded));
   renderAll();
@@ -198,88 +198,4 @@ document.addEventListener('click', (e) => {
   const btn = e.target.closest('.table-expand-toggle');
   if(btn){ toggleTableExpanded(btn.dataset.table); }
 });
-// rows: array of already-built <tr> html strings. Returns { rowsHtml, moreHtml }.
-function limitRows(id, rows, defaultLimit){
-  const expanded = isTableExpanded(id);
-  const shown = expanded ? rows : rows.slice(0, defaultLimit);
-  let moreHtml = '';
-  if(rows.length > defaultLimit){
-    moreHtml = `<div class="table-more-row"><button class="btn-ghost btn-small table-expand-toggle" data-table="${id}">${expanded ? 'Show less' : `Show all ${rows.length}`}</button></div>`;
-  }
-  return { rowsHtml: shown.join(''), moreHtml };
-}
-
-// --- Setup ("Connect your clan") panel collapse, same pattern as panel collapse above ---
-let setupCollapsed = localStorage.getItem('warroom_setup_collapsed') === '1';
-function applySetupCollapsed(){
-  $('#setupBody').hidden = setupCollapsed;
-  $('#setupPanel').classList.toggle('is-collapsed', setupCollapsed);
-  $('#setupToggleBtn').textContent = setupCollapsed ? 'Show' : 'Hide';
-}
-function setSetupCollapsed(collapsed){
-  setupCollapsed = collapsed;
-  try{ localStorage.setItem('warroom_setup_collapsed', collapsed ? '1' : '0'); }catch(e){}
-  applySetupCollapsed();
-}
-$('#setupToggleBtn').addEventListener('click', () => setSetupCollapsed(!setupCollapsed));
-applySetupCollapsed();
-
-// --- Settings: theme, table density, and section order — all local prefs, same pattern as above ---
-const SECTION_LABELS = {
-  secSummary: 'Clan Summary Details', secWar: 'Ongoing War Result', secInfo: 'Clan Info',
-  secCapital: 'Ongoing Capital Raid', secAttackLog: 'Live Attack Log', secHistory: 'Full History', secNotes: 'Notes'
-};
-const DEFAULT_SECTION_ORDER = ['secSummary', 'secWar', 'secInfo', 'secCapital', 'secAttackLog', 'secHistory', 'secNotes'];
-let sectionOrder = DEFAULT_SECTION_ORDER.slice();
-try{
-  const saved = JSON.parse(localStorage.getItem('warroom_section_order') || 'null');
-  // Only trust a saved order if it's the same set of sections this version knows about —
-  // guards against a stale order from an older file version breaking the layout.
-  if(Array.isArray(saved) && saved.length === DEFAULT_SECTION_ORDER.length && DEFAULT_SECTION_ORDER.every(id => saved.includes(id))){
-    sectionOrder = saved;
-  }
-}catch(e){ sectionOrder = DEFAULT_SECTION_ORDER.slice(); }
-
-function applySectionOrder(){
-  const colMain = $('#colMain');
-  if(!colMain) return;
-  const settings = document.getElementById('secSettings');
-  sectionOrder.forEach(id => {
-    const el = document.getElementById(id);
-    if(el) colMain.appendChild(el);
-  });
-  // Settings always stays last, right below Notes by default, regardless of reordering above.
-  if(settings) colMain.appendChild(settings);
-}
-
-function reorderSection(draggedId, targetId, placeAfter){
-  const from = sectionOrder.indexOf(draggedId);
-  if(from === -1 || draggedId === targetId) return;
-  sectionOrder.splice(from, 1);
-  let to = sectionOrder.indexOf(targetId);
-  if(to === -1) return;
-  if(placeAfter) to += 1;
-  sectionOrder.splice(to, 0, draggedId);
-  try{ localStorage.setItem('warroom_section_order', JSON.stringify(sectionOrder)); }catch(e){}
-  applySectionOrder();
-  renderSettings();
-}
-
-function setTheme(theme){
-  document.documentElement.setAttribute('data-theme', theme);
-  try{ localStorage.setItem('warroom_theme', theme); }catch(e){}
-  renderSettings();
-}
-
-function setDensity(density){
-  document.body.setAttribute('data-density', density);
-  try{ localStorage.setItem('warroom_density', density); }catch(e){}
-  renderSettings();
-}
-
-function setChatPosition(position){
-  document.body.classList.toggle('chat-position-top', position === 'top');
-  try{ localStorage.setItem('warroom_chat_position', position); }catch(e){}
-  renderSettings();
-}
-
+// rows: array of already-built <tr> html strings. Returns { rowsHtml, moreHtml } }.
