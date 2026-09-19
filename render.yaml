@@ -10,6 +10,8 @@ services:
         sync: false
       - key: SARVAM_TOKEN
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -18,3 +20,11 @@ services:
         sync: false
       - key: BG_POLL_INTERVAL_MS
         value: "30000"
+      # Optional: shared secret to lock the dashboard down (see README). If set,
+      # every API route requires the X-Access-Token header and the browser
+      # asks for it once. Leave unset for open access.
+      - key: RUKA_ACCESS_TOKEN
+        sync: false
+      # Optional: restrict CORS to one origin (e.g. your Render URL). Default: * (any origin).
+      - key: ALLOWED_ORIGIN
+        sync: false
